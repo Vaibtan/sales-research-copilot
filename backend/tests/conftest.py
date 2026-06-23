@@ -35,6 +35,10 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ["OPENAI_API_KEY"] = ""
 os.environ["TAVILY_API_KEY"] = ""
 
+# Default the general suite to the straight-through (auto-approve) flow; the HITL
+# plan-approval path is exercised explicitly in test_hitl.py with the flag on.
+os.environ["HITL_PLAN_APPROVAL"] = "false"
+
 
 @pytest.fixture(scope="session")
 def settings() -> Settings:

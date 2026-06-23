@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ChatPanel } from '../components/ChatPanel'
+import { PlanReview } from '../components/PlanReview'
 import { ProgressView } from '../components/ProgressView'
 import { ReportView } from '../components/ReportView'
 import { StatusBadge } from '../components/StatusBadge'
@@ -30,6 +31,7 @@ export function SessionDetailPage() {
   const terminal = isTerminal(effectiveStatus)
   const degraded = detail.degraded || progress?.degraded || false
   const failed = effectiveStatus === 'failed'
+  const awaitingApproval = effectiveStatus === 'awaiting_approval'
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -48,7 +50,9 @@ export function SessionDetailPage() {
       )}
 
       <div className="mt-8">
-        {terminal && detail.report ? (
+        {awaitingApproval ? (
+          <PlanReview sessionId={id} onApproved={reload} />
+        ) : terminal && detail.report ? (
           <>
             <ReportView report={detail.report} />
             <ChatPanel sessionId={id} />

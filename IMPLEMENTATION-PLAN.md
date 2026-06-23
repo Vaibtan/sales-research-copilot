@@ -432,11 +432,13 @@ PRD refs: §6.1 (`interrupt`), §6.3 (HITL), §4 step 3, §9 (`/approve-plan`), 
 
 ### Acceptance criteria
 
-- [ ] The graph `interrupt()`s after `plan` (between `plan` and `recall`); status becomes `awaiting_approval`.
-- [ ] `POST /sessions/{id}/approve-plan` resumes with `Command(resume=edited_questions)`; questions retain stable `question_id`s.
-- [ ] React: a plan-review screen lists the proposed questions, allows edit/add/remove, and an Approve action that continues the run (progress UI resumes via SSE).
-- [ ] Acceptance: after approval, `recall` binds reused facts **only** to current-plan `question_id`s.
-- [ ] Demo: start a run, pause at planning, edit a question, approve, and watch the run complete with the edited plan.
+- [x] The graph `interrupt()`s after `plan` (between `plan` and `recall`); status becomes `awaiting_approval`. *(new `await_approval` node calls `interrupt(proposed)`; `plan` sets status `awaiting_approval` when the gate is on; the runner persists the paused phase after `astream` returns. Always-present pass-through when off, so the topology is resume-stable. `test_run_pauses_for_approval_and_exposes_plan`.)*
+- [x] `POST /sessions/{id}/approve-plan` resumes with `Command(resume=edited_questions)`; questions retain stable `question_id`s. *(`runner.approve_plan` re-enters with `Command(resume=…)`; `_apply_plan_edits` keeps a kept question's id and mints fresh ids for added ones — `test_apply_plan_edits_keeps_stable_ids_and_mints_new`.)*
+- [x] React: a plan-review screen lists the proposed questions, allows edit/add/remove, and an Approve action that continues the run (progress UI resumes via SSE). *(`PlanReview` (GET `/plan` → editable rows + section selects + add/remove) → `approvePlan` → `useLiveSession.reload()` re-attaches the stream. tsc + vite build clean.)*
+- [x] Acceptance: after approval, `recall` binds reused facts **only** to current-plan `question_id`s. *(recall runs *after* `await_approval`, iterating `state["plan"].questions` — the approved set — so a remapped fact can only own an approved id; section-scoped match further guards it.)*
+- [x] Demo: start a run, pause at planning, edit a question, approve, and watch the run complete with the edited plan. *(`test_approve_edited_plan_drives_the_run`: dropping the Products question → that section is an honest Unknown in the final report, proving the edited plan drove the run.)*
+
+> **Notes:** `hitl_plan_approval` is config-driven (default **on** in the app for the demo; `.env` toggles it). The general test suite forces it **off** (conftest) so P0/P1 flows stay straight-through; `test_hitl.py` exercises the on-path. `/approve-plan` is single-flight (reuses the `SessionBusyError` guard) and 409s if the session isn't awaiting approval. Backend suite **91 pass** (prior 87 + 4).
 
 ### Blocked by
 

@@ -102,6 +102,32 @@ class SessionHistoryResponse(BaseModel):
     sessions: list[SessionSummaryOut]
 
 
+class PlanQuestionIn(BaseModel):
+    id: str | None = None  # present → keep its stable id; absent → a new question
+    text: str = Field(min_length=1, max_length=500)
+    section: Section
+
+
+class PlanQuestionOut(BaseModel):
+    id: str
+    text: str
+    section: Section
+
+
+class PlanResponse(BaseModel):
+    questions: list[PlanQuestionOut]
+
+
+class ApprovePlanRequest(BaseModel):
+    questions: list[PlanQuestionIn] = Field(min_length=1)
+
+
+class ApprovePlanResponse(BaseModel):
+    session_id: str
+    status: str
+    approved: bool
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 

@@ -80,6 +80,12 @@ export interface ProgressEvent {
   terminal: boolean
 }
 
+export interface ProposedQuestion {
+  id: string
+  text: string
+  section: string
+}
+
 export interface Citation {
   source_id: string
   url: string

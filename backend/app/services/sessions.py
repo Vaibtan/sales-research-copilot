@@ -95,5 +95,29 @@ class SessionService:
         log.info("session.resume", session_id=session_id, resumed=resumed, status=status)
         return status, resumed
 
+    async def pending_plan(self, session_id: str):
+        """The proposed plan questions for the HITL review screen, or ``None`` if
+        the session is unknown (the list is empty if there is no plan yet)."""
+        detail = await repository.get_session_detail(self._db, session_id)
+        if detail is None:
+            return None
+        return await self._runner.snapshot_plan(session_id) or []
+
+    async def approve_plan(
+        self, session_id: str, edited_questions: list[dict]
+    ) -> tuple[str, bool]:
+        """Resume a run paused at the HITL gate with the (edited) questions (§9).
+        Raises :class:`SessionBusyError` if a run is already executing."""
+        approved = await self._runner.approve_plan(session_id, edited_questions)
+        fresh = await repository.get_session_detail(self._db, session_id)
+        status = fresh.status if fresh is not None else "recalling"
+        log.info(
+            "session.approve_plan",
+            session_id=session_id,
+            approved=approved,
+            questions=len(edited_questions),
+        )
+        return status, approved
+
     async def list_history(self, *, limit: int = 50, offset: int = 0) -> list[SessionSummary]:
         return await repository.list_sessions(self._db, limit=limit, offset=offset)

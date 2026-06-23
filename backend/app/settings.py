@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     quality_threshold: float = 0.7  # τ — re-research below this score
     max_extra_passes: int = 1  # bounded loop-back budget
 
+    # HITL plan-approval (PRD §6.1, §13 P2; slice 12). On → the graph interrupts
+    # after `plan` for human review/edit of the questions before research.
+    hitl_plan_approval: bool = True
+
     # --- Cross-session memory (PRD §7.1, §16; slice 11) -----------------
     memory_ttl_durable_seconds: float = 14 * 86400  # 14d — Overview/Products warm-start
     memory_ttl_volatile_seconds: float = 86400  # 1d — Signals/Risks re-fetched

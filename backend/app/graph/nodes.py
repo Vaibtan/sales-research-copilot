@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from langgraph.errors import NodeError
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from app.db.repository import (
     ChunkRow,
@@ -66,7 +66,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def make_plan_node(llm: LLMClient):
+def make_plan_node(llm: LLMClient, *, next_status: str = "recalling"):
     async def plan(state: ResearchState) -> dict:
         ctx = PlanContext(
             company=state["company"],
@@ -88,9 +88,61 @@ def make_plan_node(llm: LLMClient):
             )
             for i, q in enumerate(draft.questions)
         ]
-        return {"plan": ResearchPlan(questions=questions), "status": "recalling"}
+        # `next_status` is "awaiting_approval" when the HITL gate is on (so the pause
+        # surfaces that status), else "recalling" (straight through).
+        return {"plan": ResearchPlan(questions=questions), "status": next_status}
 
     return plan
+
+
+def _apply_plan_edits(
+    session_id: str, original: list[Question], edited: list[dict]
+) -> list[Question]:
+    """Build the approved question list from the human's edits. A question kept by
+    its ``id`` retains that stable id (even if its text changed); a new question
+    (no/unknown id) gets a fresh deterministic id; omitted questions are dropped."""
+    known = {q.id for q in original}
+    result: list[Question] = []
+    for i, item in enumerate(edited):
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        section = Section(item["section"])
+        qid = item.get("id")
+        if qid in known:
+            result.append(Question(id=qid, text=text, section=section))
+        else:
+            result.append(Question(id=question_id(session_id, i, text), text=text, section=section))
+    return result
+
+
+def make_await_approval_node(*, enabled: bool):
+    """HITL gate between ``plan`` and ``recall`` (PRD §6.1, §6.3). When enabled the
+    node ``interrupt()``s with the proposed questions and resumes with the (edited)
+    plan via ``Command(resume=...)``; when disabled it is a transparent pass-through
+    so the topology stays stable across the auto-approve and human-approve flows."""
+
+    async def await_approval(state: ResearchState) -> dict:
+        if not enabled:
+            return {}
+        plan = state["plan"]
+        assert plan is not None
+        proposed = {
+            "questions": [
+                {"id": q.id, "text": q.text, "section": q.section.value}
+                for q in plan.questions
+            ]
+        }
+        # First hit: raises and pauses. On resume: returns the Command(resume=...)
+        # value — the human's (optionally edited) question list.
+        edited = interrupt(proposed)
+        if edited:
+            questions = _apply_plan_edits(state["session_id"], plan.questions, edited)
+        else:
+            questions = plan.questions
+        return {"plan": ResearchPlan(questions=questions), "status": "recalling"}
+
+    return await_approval
 
 
 def make_recall_node(

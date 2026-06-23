@@ -17,11 +17,15 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (
+    ApprovePlanRequest,
+    ApprovePlanResponse,
     ChatMessageOut,
     ChatRequest,
     CreateSessionRequest,
     CreateSessionResponse,
     MessagesResponse,
+    PlanQuestionOut,
+    PlanResponse,
     ResumeResponse,
     SessionDetailResponse,
     SessionHistoryResponse,
@@ -147,6 +151,49 @@ async def get_messages(session_id: str, request: Request) -> MessagesResponse:
     messages = await _chat(request).history(session_id)
     return MessagesResponse(
         messages=[ChatMessageOut.from_message(m) for m in messages]
+    )
+
+
+@router.get(
+    "/{session_id}/plan",
+    response_model=PlanResponse,
+    summary="Proposed research questions awaiting approval (HITL)",
+)
+async def get_plan(session_id: str, request: Request) -> PlanResponse:
+    questions = await _service(request).pending_plan(session_id)
+    if questions is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return PlanResponse(
+        questions=[
+            PlanQuestionOut(id=q.id, text=q.text, section=q.section) for q in questions
+        ]
+    )
+
+
+@router.post(
+    "/{session_id}/approve-plan",
+    response_model=ApprovePlanResponse,
+    summary="Approve (optionally edited) research questions and resume the run",
+)
+async def approve_plan(
+    session_id: str, body: ApprovePlanRequest, request: Request
+) -> ApprovePlanResponse:
+    service = _service(request)
+    detail = await service.get_detail(session_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if detail.status != "awaiting_approval":
+        raise HTTPException(
+            status_code=409, detail="session is not awaiting plan approval"
+        )
+    try:
+        status_value, approved = await service.approve_plan(
+            session_id, [q.model_dump() for q in body.questions]
+        )
+    except SessionBusyError as exc:
+        raise HTTPException(status_code=409, detail="session is already running") from exc
+    return ApprovePlanResponse(
+        session_id=session_id, status=status_value, approved=approved
     )
 
 

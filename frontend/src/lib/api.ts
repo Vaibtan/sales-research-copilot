@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   Citation,
   CreateSessionResponse,
+  ProposedQuestion,
   SessionDetail,
   SessionSummary,
 } from '../types'
@@ -106,6 +107,35 @@ export async function resumeSession(id: string): Promise<ResumeResponse> {
   })
   if (!res.ok) throw await parseError(res)
   return (await res.json()) as ResumeResponse
+}
+
+/** Proposed research questions for the HITL review screen (status awaiting_approval). */
+export async function getPlan(
+  id: string,
+  signal?: AbortSignal,
+): Promise<ProposedQuestion[]> {
+  const res = await fetch(`${API_BASE_URL}/sessions/${id}/plan`, { signal })
+  if (!res.ok) throw await parseError(res)
+  return ((await res.json()) as { questions: ProposedQuestion[] }).questions
+}
+
+export interface PlanQuestionEdit {
+  id?: string // present → keep its stable id; absent → a new question
+  text: string
+  section: string
+}
+
+export async function approvePlan(
+  id: string,
+  questions: PlanQuestionEdit[],
+): Promise<{ status: string; approved: boolean }> {
+  const res = await fetch(`${API_BASE_URL}/sessions/${id}/approve-plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ questions }),
+  })
+  if (!res.ok) throw await parseError(res)
+  return (await res.json()) as { status: string; approved: boolean }
 }
 
 /** URL of the live-progress SSE stream for a session (consumed via EventSource). */

@@ -17,9 +17,10 @@ import asyncio
 import contextlib
 
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
 
 from app.db.repository import set_session_status
-from app.domain.models import ProgressEvent, ProgressSource
+from app.domain.models import ProgressEvent, ProgressSource, Question
 from app.domain.state import ResearchState
 from app.infra.database import Database
 from app.infra.events import ProgressBus
@@ -77,6 +78,44 @@ class GraphRunner:
     def start(self, session_id: str, initial_state: ResearchState) -> None:
         """Begin a fresh run (input = the initial state)."""
         self._spawn(session_id, initial_state)
+
+    async def snapshot_plan(self, session_id: str) -> list[Question] | None:
+        """The proposed plan questions at the current checkpoint, for the HITL
+        review screen (or ``None`` if there is no plan yet)."""
+        config = {"configurable": {"thread_id": session_id}}
+        snapshot = await self._graph.aget_state(config)
+        plan = (snapshot.values or {}).get("plan")
+        return plan.questions if plan is not None else None
+
+    async def approve_plan(self, session_id: str, edited_questions: list[dict]) -> bool:
+        """Resume a run paused at the HITL gate with the (edited) questions (§6.1,
+        slice 12). Single-flight like :meth:`resume`; returns ``False`` if the run
+        is not actually paused at an interrupt."""
+        if session_id in self._active:
+            raise SessionBusyError(session_id)
+        self._active.add(session_id)
+        spawned = False
+        try:
+            config = {"configurable": {"thread_id": session_id}}
+            snapshot = await self._graph.aget_state(config)
+            if not snapshot.next:  # not paused → nothing to approve
+                return False
+            prev = await self._bus.latest(session_id)
+            base = (prev.step + 1) if prev is not None else 0
+            await set_session_status(self._db, session_id=session_id, status="recalling")
+            await self._publish(
+                ProgressEvent(
+                    session_id=session_id, step=base, status="recalling", terminal=False
+                )
+            )
+            self._spawn(
+                session_id, Command(resume=edited_questions), start_step=base + 1
+            )
+            spawned = True
+            return True
+        finally:
+            if not spawned:
+                self._active.discard(session_id)
 
     async def resume(
         self, session_id: str, *, fresh_state: ResearchState | None = None
@@ -145,7 +184,7 @@ class GraphRunner:
     def _spawn(
         self,
         session_id: str,
-        graph_input: ResearchState | None,
+        graph_input: ResearchState | Command | None,
         *,
         start_step: int = 0,
     ) -> None:
@@ -165,7 +204,7 @@ class GraphRunner:
     async def _run(
         self,
         session_id: str,
-        graph_input: ResearchState | None,
+        graph_input: ResearchState | Command | None,
         *,
         start_step: int = 0,
     ) -> None:
@@ -177,7 +216,19 @@ class GraphRunner:
             ):
                 await self._publish(_progress_from_state(session_id, step, state))
                 step += 1
-            log.info("graph.run_complete", session_id=session_id)
+            # The run either reached END or *paused* at an interrupt (HITL gate).
+            # On a pause, persist the non-terminal phase so GET / approve-plan see
+            # it (the values stream already published the awaiting-approval event).
+            snapshot = await self._graph.aget_state(config)
+            if snapshot.next:
+                phase = (snapshot.values or {}).get("status", "awaiting_approval")
+                with contextlib.suppress(Exception):
+                    await set_session_status(
+                        self._db, session_id=session_id, status=phase
+                    )
+                log.info("graph.run_paused", session_id=session_id, phase=phase)
+            else:
+                log.info("graph.run_complete", session_id=session_id)
         except Exception:
             log.exception("graph.run_failed", session_id=session_id)
             with contextlib.suppress(Exception):

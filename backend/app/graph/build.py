@@ -21,6 +21,7 @@ from app.db.ledger import CallLedger
 from app.domain.state import ResearchState
 from app.graph.nodes import (
     make_analyze_node,
+    make_await_approval_node,
     make_error_handler,
     make_extract_node,
     make_gather_node,
@@ -53,6 +54,7 @@ def build_graph(
     memory_ttl_volatile_seconds: float = 86400,
     memory_match_max_distance: float = 0.85,
     memory_revalidator=None,
+    hitl_plan_approval: bool = False,
 ) -> CompiledStateGraph:
     # Route every LLM / embedding call through the durable ledger (§6.5) so a
     # mid-node kill re-pays nothing on resume. When no ledger is supplied (some unit
@@ -71,7 +73,15 @@ def build_graph(
     builder = StateGraph(ResearchState)
 
     # plan failure → no error_handler → the run fails (no usable report, §9.1).
-    builder.add_node("plan", make_plan_node(llm), retry_policy=net_retry)
+    plan_next = "awaiting_approval" if hitl_plan_approval else "recalling"
+    builder.add_node(
+        "plan", make_plan_node(llm, next_status=plan_next), retry_policy=net_retry
+    )
+    # HITL gate (slice 12): interrupt for human review/edit when enabled, else a
+    # transparent pass-through. Always present so the topology is resume-stable.
+    builder.add_node(
+        "await_approval", make_await_approval_node(enabled=hitl_plan_approval)
+    )
     builder.add_node(
         "recall",
         make_recall_node(
@@ -116,7 +126,8 @@ def build_graph(
     )
 
     builder.add_edge(START, "plan")
-    builder.add_edge("plan", "recall")
+    builder.add_edge("plan", "await_approval")
+    builder.add_edge("await_approval", "recall")
     builder.add_edge("recall", "gather")
     builder.add_edge("gather", "extract")
     builder.add_edge("extract", "analyze")

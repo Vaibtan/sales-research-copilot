@@ -90,6 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         memory_ttl_volatile_seconds=settings.memory_ttl_volatile_seconds,
         memory_match_max_distance=settings.memory_match_max_distance,
         memory_revalidator=memory_revalidator,
+        hitl_plan_approval=settings.hitl_plan_approval,
     )
     progress_bus = ProgressBus(cache)
     runner = GraphRunner(graph, db, progress_bus)
