@@ -230,14 +230,16 @@ lease_expires_at), §11 (reliability).
 
 ### Acceptance criteria
 
-- [ ] `llm_calls` ledger exists with `status ∈ {in_progress, done, failed}`, `idempotency_key`, `locked_by`, `lease_expires_at`, PK `(session_id, node, attempt, input_hash)`.
-- [ ] **Reserve:** atomic insert of an `in_progress` row with owner token + lease; a duplicate key with a *valid* lease single-flights (waits); a `done` row returns the cached response with **no provider call**.
-- [ ] **Takeover:** an `in_progress` row whose lease has **expired** is taken over by a waiter via compare-and-swap (new owner + renewed lease); the active owner heartbeats to extend its lease in-flight — **no deadlock**.
-- [ ] **Provider idempotency key** = the ledger key, so a re-sent request after a crash/takeover is deduplicated by the provider within its window.
-- [ ] **Commit:** response stored atomically (`status → done`); permanent failure sets `failed` so the key can be retried.
-- [ ] Test `crash-after-reserve-before-call`: asserts lease takeover and no deadlock.
-- [ ] Test `kill-before-commit`: asserts no double-charge (provider idempotency key honored).
-- [ ] Test `concurrent-resume`: asserts single-flight (only one provider call for the same key).
+- [x] `llm_calls` ledger exists with `status ∈ {in_progress, done, failed}`, `idempotency_key`, `locked_by`, `lease_expires_at`, PK `(session_id, node, attempt, input_hash)`. *(migration `0003_llm_calls.sql`; `CHECK` on status; no FK on session_id so the ledger is keyed independently of the relational materialization.)*
+- [x] **Reserve:** atomic insert of an `in_progress` row with owner token + lease; a duplicate key with a *valid* lease single-flights (waits); a `done` row returns the cached response with **no provider call**. *(`CallLedger._reserve` = `INSERT … ON CONFLICT DO NOTHING RETURNING`; valid-lease waiters poll; `done` short-circuits — `test_done_call_returns_cache_without_reinvoking_provider`.)*
+- [x] **Takeover:** an `in_progress` row whose lease has **expired** is taken over by a waiter via compare-and-swap (new owner + renewed lease); the active owner heartbeats to extend its lease in-flight — **no deadlock**. *(`_take_expired` CAS on `locked_by IS NOT DISTINCT FROM <observed>` + `lease_expires_at <= now()`; `_heartbeat` extends the lease while producing; `test_crash_after_reserve_before_call_takes_over_without_deadlock` via `asyncio.wait_for`.)*
+- [x] **Provider idempotency key** = the ledger key, so a re-sent request after a crash/takeover is deduplicated by the provider within its window. *(`LedgerKey.idempotency_key` = digest of the 4-tuple; the real OpenAI client passes it through — slice 7.)*
+- [x] **Commit:** response stored atomically (`status → done`); permanent failure sets `failed` so the key can be retried. *(`_commit` guarded on `locked_by=owner` (a taken-over owner can't overwrite); `_fail` on exception; `test_failed_row_is_retryable`.)*
+- [x] Test `crash-after-reserve-before-call`: asserts lease takeover and no deadlock.
+- [x] Test `kill-before-commit`: asserts no double-charge (provider idempotency key honored). *(`_FakeProvider` charges once per idempotency key; takeover re-sends the same key → `charges == 1`.)*
+- [x] Test `concurrent-resume`: asserts single-flight (only one provider call for the same key). *(`test_concurrent_resume_single_flights`: 3 concurrent `run`s → 1 provider call.)*
+
+> **Carry-forwards / notes:** lease math is evaluated **DB-side** (`now()`) to dodge app/DB clock skew; each ledger step is its own committed statement (not one long txn) so cross-connection waiters observe transitions immediately. The graph routes **LLM** calls through the ledger now (`build_graph(ledger=…)` wraps the client in `LedgerLLMClient`; nodes pass `CallSite(session_id, node, attempt)`); **search** (slice 7) and **embedding** (slice 9) calls route through the same ledger as those providers land. Backend suite **41 pass** (prior 35 + 6).
 
 ### Blocked by
 

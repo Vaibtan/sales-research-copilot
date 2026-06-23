@@ -13,7 +13,7 @@ from collections.abc import Iterable, Sequence
 
 from pydantic import BaseModel
 
-from app.providers.base import LLMTask, SearchHit
+from app.providers.base import CallSite, LLMTask, SearchHit
 from app.providers.contexts import (
     AnalyzeContext,
     ExtractContext,
@@ -94,7 +94,11 @@ class MockLLMClient:
         context: BaseModel,
         output_type: type[BaseModel],
         model: str | None = None,
+        call: CallSite | None = None,
+        idempotency_key: str | None = None,
     ) -> BaseModel:
+        # `call` / `idempotency_key` are ledger/provider concerns the mock ignores;
+        # `self.calls` counts *actual* provider invocations (one per produce()).
         self.calls[task] += 1
         match task:
             case LLMTask.PLAN:

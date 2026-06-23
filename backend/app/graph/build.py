@@ -16,6 +16,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.db.ledger import CallLedger
 from app.domain.state import ResearchState
 from app.graph.nodes import (
     make_analyze_node,
@@ -29,6 +30,7 @@ from app.graph.nodes import (
 )
 from app.infra.database import Database
 from app.providers.base import LLMClient, SearchProvider
+from app.providers.ledger import LedgerLLMClient
 
 
 def build_graph(
@@ -39,14 +41,21 @@ def build_graph(
     checkpointer: AsyncPostgresSaver,
     max_extra_passes: int,
     quality_threshold: float,
+    ledger: CallLedger | None = None,
 ) -> CompiledStateGraph:
+    # Route every LLM call through the durable ledger (§6.5) so a mid-node kill
+    # re-pays nothing on resume. When no ledger is supplied (some unit tests) the
+    # nodes call the provider directly.
+    if ledger is not None:
+        llm = LedgerLLMClient(llm, ledger)
+
     builder = StateGraph(ResearchState)
 
     builder.add_node("plan", make_plan_node(llm))
     builder.add_node("recall", make_recall_node())
     builder.add_node("gather", make_gather_node(search))
     builder.add_node("extract", make_extract_node(llm, max_extra_passes=max_extra_passes))
-    builder.add_node("analyze", make_analyze_node(llm))
+    builder.add_node("analyze", make_analyze_node(llm, max_extra_passes=max_extra_passes))
     builder.add_node(
         "quality_gate",
         make_quality_node(

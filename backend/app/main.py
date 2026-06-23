@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
 from app.api.routes import health, sessions
+from app.db.ledger import CallLedger, LedgerConfig
 from app.db.migrator import run_migrations
 from app.graph import GraphRunner, build_checkpointer, build_graph
 from app.infra import Cache, Database, ProgressBus
@@ -41,6 +42,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     checkpointer = await build_checkpointer(settings.database_url)
     llm, search = build_providers(settings)
+    ledger = CallLedger(
+        db,
+        LedgerConfig(
+            lease_seconds=settings.ledger_lease_seconds,
+            heartbeat_seconds=settings.ledger_heartbeat_seconds,
+            poll_seconds=settings.ledger_poll_seconds,
+            wait_timeout_seconds=settings.ledger_wait_timeout_seconds,
+        ),
+    )
     graph = build_graph(
         llm=llm,
         search=search,
@@ -48,6 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         checkpointer=checkpointer.saver,
         max_extra_passes=settings.max_extra_passes,
         quality_threshold=settings.quality_threshold,
+        ledger=ledger,
     )
     progress_bus = ProgressBus(cache)
     runner = GraphRunner(graph, db, progress_bus)

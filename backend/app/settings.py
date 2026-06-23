@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     quality_threshold: float = 0.7  # τ — re-research below this score
     max_extra_passes: int = 1  # bounded loop-back budget
 
+    # --- Durable call ledger (PRD §6.5; slice 6) -------------------------
+    ledger_lease_seconds: float = 30.0  # reservation ownership before takeover
+    ledger_heartbeat_seconds: float = 10.0  # owner lease-extension cadence
+    ledger_poll_seconds: float = 0.25  # waiter re-check cadence (single-flight)
+    ledger_wait_timeout_seconds: float = 120.0  # max single-flight wait
+
     # --- Providers (unused in slice 1; wired in slice 7) -----------------
     openai_api_key: str | None = None
     tavily_api_key: str | None = None

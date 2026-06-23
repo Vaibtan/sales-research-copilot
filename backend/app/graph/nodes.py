@@ -39,7 +39,7 @@ from app.domain.sections import CONTENT_SECTIONS, freshness_for
 from app.domain.state import ResearchState
 from app.infra.database import Database
 from app.logging import get_logger
-from app.providers.base import LLMClient, LLMTask, SearchProvider
+from app.providers.base import CallSite, LLMClient, LLMTask, SearchProvider
 from app.providers.contexts import (
     AnalyzeContext,
     ExtractContext,
@@ -62,7 +62,12 @@ def make_plan_node(llm: LLMClient):
             objective=state["objective"],
             sections=list(CONTENT_SECTIONS),
         )
-        draft = await llm.parse(task=LLMTask.PLAN, context=ctx, output_type=ResearchPlanDraft)
+        draft = await llm.parse(
+            task=LLMTask.PLAN,
+            context=ctx,
+            output_type=ResearchPlanDraft,
+            call=CallSite(state["session_id"], "plan", 1),
+        )
         questions = [
             Question(
                 id=question_id(state["session_id"], i, q.text),
@@ -138,6 +143,7 @@ def make_extract_node(llm: LLMClient, *, max_extra_passes: int):
                 task=LLMTask.EXTRACT,
                 context=ExtractContext(question=question, source=source, attempt=attempt),
                 output_type=ExtractedFacts,
+                call=CallSite(state["session_id"], "extract", attempt),
             )
             for claim in extracted.claims:
                 claim_norm = normalize_claim(claim.claim)
@@ -160,15 +166,21 @@ def make_extract_node(llm: LLMClient, *, max_extra_passes: int):
     return extract
 
 
-def make_analyze_node(llm: LLMClient):
+def make_analyze_node(llm: LLMClient, *, max_extra_passes: int):
     async def analyze(state: ResearchState) -> dict:
+        attempt = max_extra_passes - state["retries_left"] + 1
         ctx = AnalyzeContext(
             company=state["company"],
             objective=state["objective"],
             facts=state["facts"],
             sources=state["sources"],
         )
-        draft = await llm.parse(task=LLMTask.ANALYZE, context=ctx, output_type=DraftReport)
+        draft = await llm.parse(
+            task=LLMTask.ANALYZE,
+            context=ctx,
+            output_type=DraftReport,
+            call=CallSite(state["session_id"], "analyze", attempt),
+        )
         return {"draft": draft, "status": "grading"}
 
     return analyze
@@ -186,7 +198,12 @@ def make_quality_node(llm: LLMClient, *, quality_threshold: float, max_extra_pas
             questions=state["plan"].questions,  # type: ignore[union-attr]
             attempt=attempt,
         )
-        verdict = await llm.parse(task=LLMTask.QUALITY, context=ctx, output_type=QualityVerdict)
+        verdict = await llm.parse(
+            task=LLMTask.QUALITY,
+            context=ctx,
+            output_type=QualityVerdict,
+            call=CallSite(state["session_id"], "quality_gate", attempt),
+        )
 
         # Loop back only when the draft is sub-threshold, we still have budget, AND
         # the judge named specific weak questions to target. An empty weak set is
