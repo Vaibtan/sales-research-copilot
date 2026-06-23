@@ -82,11 +82,14 @@ export function PlanReview({
 
       <ul className="mt-5 space-y-3">
         {rows.map((row, i) => (
-          <li key={row.id ?? `new-${i}`} className="flex items-start gap-2">
+          <li
+            key={row.id ?? `new-${i}`}
+            className="flex flex-col gap-2 sm:flex-row sm:items-start"
+          >
             <select
               value={row.section}
               onChange={(e) => update(i, { section: e.target.value })}
-              className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-2 text-xs text-slate-300 focus:border-sky-500/50 focus:outline-none"
+              className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-2 text-xs text-slate-300 focus:border-sky-500/50 focus:outline-none sm:w-44"
             >
               {SECTION_ORDER.map((s) => (
                 <option key={s} value={s}>

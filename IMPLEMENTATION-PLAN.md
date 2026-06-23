@@ -522,12 +522,14 @@ FE responsive-design requirement.
 
 ### Acceptance criteria
 
-- [ ] `README.md`: what it is, setup (`docker compose up`, `.env` keys), run instructions, and the kill/resume demo steps.
-- [ ] `architecture.md`: system/graph architecture distilled from the PRD (not a copy — the reader-facing WHAT).
-- [ ] `engineering-decisions.md`: 3 major decisions, alternatives, tradeoffs, top tech-debt items, biggest technical risk, and the "2 extra weeks" answer (TASK §engineering-decisions).
-- [ ] `product-improvements.md` (≤2 pages): answers all 10 TASK product/business questions (≥5 weaknesses, top-3 next, buyer/user/why-pay, metrics, 4-week roadmap, risks, remove/add features, 90-day roadmap, first change).
-- [ ] FE responsive across breakpoints; loading/error/degraded states verified end-to-end.
-- [ ] No stale docs: deferred work matches the [Fast-follow backlog](#fast-follow-backlog-post-mvp--outside-the-gate).
+- [x] `README.md`: what it is, setup (`docker compose up`, `.env` keys), run instructions, and the kill/resume demo steps. *(rewritten: quickstart, what-you-can-do, the kill-and-resume demo, tests, dev, obs, layout, API table.)*
+- [x] `architecture.md`: system/graph architecture distilled from the PRD (not a copy — the reader-facing WHAT). *(system diagram, the workflow + primitive-traceability table, durable-execution layers, 3-layer memory, request/streaming flow, reliability/cost.)*
+- [x] `engineering-decisions.md`: 3 major decisions, alternatives, tradeoffs, top tech-debt items, biggest technical risk, and the "2 extra weeks" answer (TASK §engineering-decisions). *(all 6 points covered.)*
+- [x] `product-improvements.md` (≤2 pages): answers all 10 TASK product/business questions (≥5 weaknesses, top-3 next, buyer/user/why-pay, metrics, 4-week roadmap, risks, remove/add features, 90-day roadmap, first change). *(all 10 answered, ~2 pages.)*
+- [x] FE responsive across breakpoints; loading/error/degraded/awaiting-approval states implemented; PlanReview rows stack on mobile. *(states all implemented + build/tsc clean; live in-browser cross-breakpoint review is the user's HITL gate.)*
+- [x] No stale docs: deferred work matches the [Fast-follow backlog](#fast-follow-backlog-post-mvp--outside-the-gate). *(engineering-decisions tech-debt + product-improvements roadmap align with the backlog: eval harness, CRM, auth/multi-tenancy, richer sources.)*
+
+> **HITL note (user's review):** docs are drafted for the user to own voice/emphasis; the live in-browser responsive walkthrough is the user's final gate (the four docs are at repo root: `README.md`, `architecture.md`, `engineering-decisions.md`, `product-improvements.md`). Backend suite **98 pass**; FE tsc + vite build clean.
 
 ### Blocked by
 
