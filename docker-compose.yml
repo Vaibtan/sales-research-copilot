@@ -1,0 +1,86 @@
+name: sales-research-copilot
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: copilot
+      POSTGRES_PASSWORD: copilot
+      POSTGRES_DB: copilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U copilot -d copilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      ENVIRONMENT: development
+      LOG_JSON: "true"
+      LOG_LEVEL: INFO
+      # In-network service hostnames (override any localhost values from .env).
+      DATABASE_URL: postgresql://copilot:copilot@postgres:5432/copilot
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["http://localhost:5173"]'
+    env_file:
+      # Optional: provides OPENAI_API_KEY / TAVILY_API_KEY in later slices.
+      - path: .env
+        required: false
+    # Dev: live-reload on source changes (the image stays generic).
+    command: >-
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --reload --reload-dir /app/backend
+    volumes:
+      - ./backend:/app/backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  web:
+    build:
+      context: ./frontend
+    environment:
+      # Consumed by the browser, which runs on the host → reach the API on localhost.
+      VITE_API_BASE_URL: http://localhost:8000
+    # Dev: bind-mount source for Vite HMR; keep the image's node_modules.
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

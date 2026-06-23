@@ -62,12 +62,12 @@ PRD refs: §12 (stack/infra), §11 (config: `pydantic-settings`, `.env.example`,
 
 ### Acceptance criteria
 
-- [ ] `docker compose up` starts `api`, `web`, `postgres` (pgvector image), `redis` cleanly.
-- [ ] `GET /healthz` returns readiness reflecting **live** DB + Redis checks (not a static 200).
-- [ ] The web shell loads and renders API health (healthy / unhealthy) from `/healthz`.
-- [ ] Config is loaded via `pydantic-settings`; `.env.example` lists every required key with empty values; no secrets are committed.
-- [ ] `.gitignore` excludes `.env`; the repo has `backend/` and `frontend/` (or equivalent) structure.
-- [ ] Structured JSON logging is initialized (scaffold; full per-node fields land in slice 14).
+- [x] `docker compose up` starts `api`, `web`, `postgres` (pgvector image), `redis` cleanly.
+- [x] `GET /healthz` returns readiness reflecting **live** DB + Redis checks (not a static 200). *(verified: killing redis → 503 `redis:false`; restoring → 200)*
+- [x] The web shell loads and renders API health (healthy / unhealthy) from `/healthz`.
+- [x] Config is loaded via `pydantic-settings`; `.env.example` lists every required key with empty values; no secrets are committed. *(secret provider keys empty; non-secret DSNs carry dev defaults)*
+- [x] `.gitignore` excludes `.env`; the repo has `backend/` and `frontend/` (or equivalent) structure.
+- [x] Structured JSON logging is initialized (scaffold; full per-node fields land in slice 14).
 
 ### Blocked by
 
@@ -94,15 +94,15 @@ PRD refs: §6.1 topology, §6.2 `ResearchState` + reducers (`merge_by_id`, `supe
 
 ### Acceptance criteria
 
-- [ ] `POST /sessions {company, website, objective}` creates a session row and starts the graph; returns `session_id`.
-- [ ] On create, `company_key` is computed and stored (eTLD+1 of `website`, fallback normalized company name) — needed by recall (#11), §16.
-- [ ] The graph runs all baseline nodes over `ResearchState`; `SearchProvider` and the LLM client are behind interfaces and **mocked** (deterministic fixtures).
-- [ ] Reducers behave per spec: `merge_by_id` dedupes `sources` by deterministic id; `supersede_by_question` is in place for `facts`.
-- [ ] `PostgresSaver` writes a checkpoint per super-step (`PostgresSaver.setup()` run at boot/migration).
-- [ ] `persist` writes `sessions`, `reports` (1/session), `sources`, `facts` with their deterministic ids + unique constraints.
-- [ ] `GET /sessions/{id}` returns the session + report when ready: all 9 sections, each claim carrying `source_id`(s), unsupported items in **Unknowns** (no fabrication), and a **Sources** list.
-- [ ] React: a create form (`company`, `website`, `objective`) and a detail page rendering the 9 sections with inline citations, Unknowns, and Sources.
-- [ ] Graph integration test with deterministic mocks asserts a full report is produced and persisted.
+- [x] `POST /sessions {company, website, objective}` creates a session row and starts the graph; returns `session_id`.
+- [x] On create, `company_key` is computed and stored (eTLD+1 of `website`, fallback normalized company name) — needed by recall (#11), §16. *(tldextract bundled PSL; verified `stripe.com`/`acme.com`/`bbc.co.uk`)*
+- [x] The graph runs all baseline nodes over `ResearchState`; `SearchProvider` and the LLM client are behind interfaces and **mocked** (deterministic fixtures).
+- [x] Reducers behave per spec: `merge_by_id` dedupes `sources` by deterministic id; `supersede_by_question` is in place for `facts` (attempt-aware; unit-tested).
+- [x] `PostgresSaver` writes a checkpoint per super-step (`AsyncPostgresSaver.setup()` run at boot; test asserts ≥8 checkpoints).
+- [x] `persist` writes `sessions`, `reports` (1/session), `sources`, `facts` with their deterministic ids + unique constraints (single transaction; idempotent upserts).
+- [x] `GET /sessions/{id}` returns the session + report when ready: all 9 sections, each claim carrying `source_id`(s), unsupported items in **Unknowns** (Risks gap, no fabrication), and a **Sources** list.
+- [x] React: a create form (`company`, `website`, `objective`) and a detail page rendering the 9 sections with inline citations, Unknowns, and Sources (verified in-browser).
+- [x] Graph integration test with deterministic mocks asserts a full report is produced and persisted. *(17 backend tests pass)*
 
 ### Blocked by
 
@@ -126,13 +126,13 @@ Technical FE reqs (workflow progress UI, session history, loading states).
 
 ### Acceptance criteria
 
-- [ ] `GET /sessions/{id}/stream` emits SSE events as nodes transition (`status` from §6.2: planning → gathering → analyzing → grading → reporting → done).
-- [ ] The stream surfaces **intermediate outputs live** (plan questions, discovered sources, fact counts, draft), not just status — satisfying the §6.3 "intermediate outputs" requirement.
-- [ ] The stream emits a final `{event:"end", status}` and then closes on any terminal status.
-- [ ] `GET /sessions` returns session history (list) ordered most-recent-first.
-- [ ] React shows live node-by-node progress driven by the SSE stream, with a loading state while the run is in flight.
-- [ ] React history list links to each session detail page.
-- [ ] Reconnecting to the stream mid-run (or after refresh) shows current progress, not a blank/stuck UI.
+- [x] `GET /sessions/{id}/stream` emits SSE events as nodes transition (`status` from §6.2: planning → gathering → analyzing → grading → reporting → done). *(runner streams `astream(stream_mode="values")` → publishes a `ProgressEvent` per super-step to Redis pub/sub; SSE endpoint subscribes. Verified via `test_sse_stream` + curl: statuses advance through the lifecycle.)*
+- [x] The stream surfaces **intermediate outputs live** (plan questions, discovered sources, fact counts, draft), not just status — satisfying the §6.3 "intermediate outputs" requirement. *(each event carries plan question texts, discovered source titles/urls, `facts_count`, `draft_ready`; asserted in tests + seen in-browser.)*
+- [x] The stream emits a final `{event:"end", status}` and then closes on any terminal status. *(SSE layer synthesizes `event: end` from a terminal `ProgressEvent.terminal`; generator returns/closes.)*
+- [x] `GET /sessions` returns session history (list) ordered most-recent-first. *(`list_sessions` ORDER BY created_at DESC; `test_history_lists_most_recent_first`.)*
+- [x] React shows live node-by-node progress driven by the SSE stream, with a loading state while the run is in flight. *(`useLiveSession` EventSource → `ProgressView` phase pipeline + live stat row; verified in-browser.)*
+- [x] React history list links to each session detail page. *(`SessionHistory` on the home page; each row links to `/sessions/:id` — verified in-browser.)*
+- [x] Reconnecting to the stream mid-run (or after refresh) shows current progress, not a blank/stuck UI. *(snapshot-on-connect from Redis `session:{id}:latest` set-with-TTL, falling back to the DB row; `test_reconnect_after_done_replays_snapshot` + in-browser on a non-terminal session shows the live pipeline, not blank.)*
 
 ### Blocked by
 
@@ -156,12 +156,17 @@ PRD refs: §6.1 (`quality_gate` routing), §6.2 (`quality`, `retries_left`, `wea
 
 ### Acceptance criteria
 
-- [ ] `quality_gate` produces a `QualityVerdict(score, gaps[], weak_questions[])`.
-- [ ] Routing: `score < τ AND retries_left > 0` → set `weak_questions`, `goto gather`; else → `report`.
-- [ ] Threshold τ and max extra passes are **config-driven** (defaults τ=0.7, ≤1 extra pass); the loop is bounded (cannot spin).
-- [ ] On loop-back, `gather` re-researches only `weak_questions`; `supersede_by_question` replaces the entire fact set for each re-researched `question_id` (no stale predecessors, `attempt` recorded).
-- [ ] Retry budget spent → proceeds gracefully to `report` (no error).
-- [ ] Test (deterministic mock): a low-scoring first draft triggers exactly one targeted re-research pass and the superseded facts are replaced, not duplicated.
+- [x] `quality_gate` produces a `QualityVerdict(score, gaps[], weak_questions[])`. *(`make_quality_node` calls the judge with the approved questions in `QualityContext` so `weak_questions` come back as `question_id`s; verdict stored on `state["quality"]` and surfaced as `report.quality_score`.)*
+- [x] Routing: `score < τ AND retries_left > 0` → set `weak_questions`, `goto gather`; else → `report`. *(node returns `Command[Literal["gather","report"]]` — no static `quality_gate → report` edge. Adds a defensive `AND weak_questions non-empty` guard: a sub-threshold score with no named weak question reports rather than accidentally re-researching everything — `test_low_score_without_weak_questions_does_not_loop`.)*
+- [x] Threshold τ and max extra passes are **config-driven** (defaults τ=0.7, ≤1 extra pass); the loop is bounded (cannot spin). *(`settings.quality_threshold` / `settings.max_extra_passes` → `build_graph` → node; bound is `retries_left` not `recursion_limit` — `test_retry_budget_exhausted_proceeds_to_report`.)*
+- [x] On loop-back, `gather` re-researches only `weak_questions`; `supersede_by_question` replaces the entire fact set for each re-researched `question_id` (no stale predecessors, `attempt` recorded). *(gather/extract already filter by `weak_questions`; quality decrements `retries_left` so the re-extract runs at `attempt=2`. Re-research yields a distinct claim → distinct fact id, so supersede visibly drops the attempt-1 fact rather than collapsing to a no-op — `test_low_score_triggers_exactly_one_targeted_repass` asserts the weak question is attempt-2-only while peers stay attempt-1.)*
+- [x] Retry budget spent → proceeds gracefully to `report` (no error). *(`test_retry_budget_exhausted_proceeds_to_report`: scores `[0.5, 0.5]`, one extra pass, terminal `done` not `failed`.)*
+- [x] Test (deterministic mock): a low-scoring first draft triggers exactly one targeted re-research pass and the superseded facts are replaced, not duplicated. *(`test_quality_loop.py` — 4 tests; full backend suite **25 pass** = prior 21 + 4.)*
+
+> **Carry-forwards (not blocking; the deterministic mock does not exhibit them):**
+> (a) On loop-back the weak question's old `assignments`/`sources` are *unioned*, not pruned — harmless here because the mock re-search returns the same urls (same ids → `merge_by_id`/`merge_assignments` dedupe), and `supersede_by_question` keeps the served *facts* correct. With *changing* real sources (slice 7) a superseded source could linger uncited in the in-state `sources` list; slice 5's full-materialization replacement (orphan deletion) is the persist-layer backstop. **This is Codex finding F1** — now an explicit slice-7 acceptance item (question-scoped assignment supersede + derive sources from surviving citations + the empty/different-re-pass regression); deferred to #7 per the 2026-06-22 decision since real changing sources are what trigger it.
+> (b) The loop bound is `retries_left`; LangGraph's default `recursion_limit=25` is a far-off backstop that comfortably covers `max_extra_passes ≤ ~4`. Raise it in the runner config if that default ever grows.
+> (c) In-app demo gap: the default mock always scores 1.0, so the loop can't be triggered in the running app until slice 7's real LLM can score low naturally (or a dev-only mock-score setting is added). Acceptance is the passing tests. *(User decision 2026-06-22: backend-only, no dev hook.)*
 
 ### Blocked by
 
@@ -187,14 +192,21 @@ PRD refs: §10 (idempotency & replacement rules, FK cascades), §11 (idempotency
 
 ### Acceptance criteria
 
-- [ ] Every row uses a deterministic id from its natural key, backed by the `UNIQUE` constraints in §10.
-- [ ] `persist` is a **single transaction** (relational rows together) — partial failure rolls back.
-- [ ] Full-materialization replacement: `sources` absent from the new output are deleted, cascading to their `facts` and `source_chunks`; `report_chunks` for the session are replaced.
-- [ ] `persist` bumps `reports.version` on regenerate (so chat staleness in #10 is detectable, §8.1).
-- [ ] `POST /sessions/{id}/resume` re-enters the graph from the last good checkpoint to **attempt an upgrade** (`degraded`/`failed` → `done`, §9.1); resuming a `done` run is a no-op.
-- [ ] Test: kill mid-run, then resume → **completed nodes are not re-executed** and there are **zero duplicate rows**.
-- [ ] Test: re-research a question → **no stale facts** remain for that `question_id`.
-- [ ] Test: a shrinking regenerate (drops a source / fewer sections) → **no orphan** `sources`, `facts`, `source_chunks`, or `report_chunks`.
+- [x] Every row uses a deterministic id from its natural key, backed by the `UNIQUE` constraints in §10. *(unchanged from slice 2 — `source.id=hash(session_id,url)`, `fact.id=hash(session_id,question_id,source_id,claim_norm)`, `report` unique on `session_id`. The replacement logic leans on these being session-scoped.)*
+- [x] `persist` is a **single transaction** (relational rows together) — partial failure rolls back. *(all writes inside one `conn.transaction()`; prune + upsert commit together or roll back.)*
+- [x] Full-materialization replacement: `sources` absent from the new output are deleted, cascading to their `facts` and `source_chunks`; `report_chunks` for the session are replaced. *(`DELETE … WHERE id <> ALL(new_ids)` for sources (cascades to facts/source_chunks) and facts (stale predecessors on surviving sources), then upsert; empty new set clears the table. `source_chunks`/`report_chunks` tables land in slice 9 — the same prune extends there.)*
+- [x] `persist` bumps `reports.version` on regenerate (so chat staleness in #10 is detectable, §8.1). *(**Content-conditional** since the Codex-F2 fix: `ON CONFLICT (session_id) DO UPDATE SET version = CASE WHEN content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN version+1 ELSE version END` — `reports.content_hash` (migration `0002`) fingerprints the served report (`report.model_dump()`; excludes `model_meta`/raw facts). A real regenerate bumps; an idempotent resume-replay of identical material does **not** (no false staleness). `test_persist_bumps_version_only_on_content_change`, `test_identical_repersist_does_not_bump_version`, `test_resume_replay_of_persist_does_not_bump_version`.)*
+- [x] `POST /sessions/{id}/resume` re-enters the graph from the last good checkpoint to **attempt an upgrade** (`degraded`/`failed` → `done`, §9.1); resuming a `done` run is a no-op. *(`GraphRunner.resume` re-streams `astream(None)`; no-op when the checkpoint is at `END`. Service: 404 unknown · `done` short-circuits to no-op (even during the final-checkpoint flush window) · 409 if the run is still actively executing in-process · else re-enter. `test_resume_done_session_is_noop`, `test_resume_unknown_session_returns_404`, `test_runner_resume_upgrades_unfinished_run`.)*
+- [x] Test: kill mid-run, then resume → **completed nodes are not re-executed** and there are **zero duplicate rows**. *(`test_kill_midrun_then_resume_completes_without_reexecuting`: `interrupt_after=["extract"]` commits a partial checkpoint, resume completes it, `llm.calls[PLAN] == 1` proves `plan` wasn't re-paid, row counts equal the report's source/fact sets.)*
+- [x] Test: re-research a question → **no stale facts** remain for that `question_id`. *(`test_no_stale_facts_after_research_then_regenerate`: a reworded claim earns a new id; the predecessor on the surviving source is deleted.)*
+- [x] Test: a shrinking regenerate (drops a source / fewer sections) → **no orphan** `sources`, `facts`, `source_chunks`, or `report_chunks`. *(`test_shrinking_regenerate_leaves_no_orphans` covers sources+facts (cascade); chunk tables don't exist until slice 9, which re-asserts the chunk half.)* **Backend suite now 32 pass** (prior 25 + 7).
+
+> **Carry-forwards / notes:**
+> (a) **Chunk replacement is deferred to slice 9** — `source_chunks`/`report_chunks` tables don't exist yet; the source-delete already cascades to `source_chunks` (FK) once they do, and `report_chunks` get an explicit replace then.
+> (b) **Resume's busy-guard is in-process only.** The Codex-F2/F4 pass hardened it: the check-and-reserve is now **atomic** — `GraphRunner.resume` adds the session to `_active` *synchronously before any `await`* and raises `SessionBusyError` on a duplicate (the old `service.is_active()`-then-`await resume()` TOCTOU is gone; `test_concurrent_resume_single_flights`). This still only single-flights within one API instance; cross-process / cross-instance single-flight needs the slice-6 durable lease (`llm_calls.locked_by`/`lease_expires_at`).
+> (c) **Graceful drain on shutdown.** `runner.shutdown()` now waits a grace window for in-flight runs to checkpoint cleanly before cancelling, so the checkpointer pool isn't yanked out mid-`aput` (was surfacing as `PoolClosed` at test teardown). Stragglers past the window are still cancelled (resumable, since LangGraph checkpoints per super-step).
+> (d) **No FE this slice** (consistent with slice 4): a Resume button + degraded banner pair naturally with slice 8's degraded path, which is also what first produces a resumable in-app state over the mocks (the mock run always succeeds).
+> (e) **Test gotcha (not a code bug):** the long-lived dev DB means tests must use *session-scoped* row ids — a bare `"s1"` collides with a prior run's row under the global PK, and `ON CONFLICT … DO UPDATE` (which doesn't rewrite `session_id`) then leaves the new session empty. Production ids are `hash(session_id, …)`, so this only bites hand-written fixtures.
 
 ### Blocked by
 
@@ -261,6 +273,7 @@ PRD refs: §0 (providers), §6.4 (budget), §15 (nano step-up for analyze), §11
 - [ ] SSRF guard blocks private/internal IP ranges on website fetch.
 - [ ] Transient failures retried per `RetryPolicy(max_attempts=3, retry_on=transient)`.
 - [ ] A real run for a real company produces a cited 9-section report; measured cost/run is logged and compared to the recomputed budget.
+- [ ] **Codex F1 — loop-back evidence replacement (deferred here from slice 4).** Real, *changing* sources first exercise this gap: on a quality loop-back `gather` re-emits only the weak question's hits, but `sources`/`assignments` are append/dedupe-merged (`merge_by_id`/`merge_assignments`), so `extract` re-runs attempt-2 over the weak question's *stale* attempt-1 sources too and they survive into report/persist — violating the §6.2/§10 per-question replacement contract. **Fix:** give `QuestionSource` an `attempt`/batch marker and add a question-scoped *supersede* reducer for `assignments` (mirror `supersede_by_question`, keyed by `question_id`), so a re-research drops the question's older assignments; then derive the final `sources` from surviving fact citations (drop sources no longer cited). The deterministic mock hides this (re-search returns identical urls → same ids → dedupe is a no-op). **Regression:** make the re-pass return *empty/different* hits for the weak question and assert the old facts **and** their now-uncited sources are absent. *(Was slice-4 carry-forward (a); deferred to #7 per 2026-06-22 decision because real changing sources are what actually trigger it.)*
 
 ### Blocked by
 
@@ -288,6 +301,8 @@ PRD refs: §6.1 (`error_handler`), §9 (error taxonomy → HTTP), §9.1 (run lif
 
 - [ ] `error_handler` on gather/extract/analyze routes a `NodeError` to `report` with `degraded=True` (honest partial report, never a 500).
 - [ ] Terminal statuses `done | degraded | failed` are represented in both the graph `status` enum (§6.2) and the `sessions.status` column, and all three are resumable via `/resume`.
+- [ ] **Codex F3 — degraded/failed-at-END are actually upgradable (deferred here from slice 5).** Today `GraphRunner.resume` returns `False` (no-op) whenever the checkpoint has no `next`, and the service only special-cases `done`. Once this slice's `error_handler` drives a degraded partial report all the way to `report → persist → END`, that terminal run sits at `next == ()` with status `degraded`, so `/resume` wrongly reports `resumed:false` — contradicting §9.1 (degraded/failed are resumable to attempt an upgrade). **Fix:** gate the resume no-op on the *persisted status* (`done` → no-op) rather than on `next == ()`; for a `degraded`/`failed`-at-END run, either leave a resumable target before fallback reporting (don't checkpoint straight to END) **or** start a fresh upgrade attempt from persisted session state (re-invoke from a rebuilt initial state on the thread; re-pays tokens until the slice-6 ledger lands). **Tests:** degraded-at-END → `/resume` schedules work (not a silent no-op); failed-at-END likewise. *(Was implicit in slice-5's resume contract; deferred to #8 per 2026-06-22 decision because the degraded path that produces such states is built here.)*
+- [ ] **Codex F5 — resume must not replay a stale terminal SSE snapshot (deferred here from the 2026-06-23 re-review).** This is the *streaming* half of F3 and only triggers once a run can fail/degrade (which lands in this slice). Two coupled defects in `stream_session` (`backend/app/api/routes/sessions.py`): (1) on reconnect it prefers the cached `bus.latest(session_id)` and ends the stream when that snapshot is `terminal`, *without* re-checking the fresh DB status — so after a `failed`/`degraded` snapshot is cached, a `/resume` that flips the status non-terminal and spawns work still serves the old terminal snapshot + `event:end` to a reconnecting client; (2) the resumed `_run` restarts `step = 0`, and the SSE loop drops `event.step <= last_step`, so resumed progress is hidden behind the prior run's higher step. **Fix:** on resume, synchronously invalidate/replace the cached latest snapshot with a non-terminal "resumed" snapshot before `GraphRunner.resume` returns; make progress ordering monotonic across resume attempts (a `run_attempt`/epoch on `ProgressEvent`, or initialize `step` above the previous latest); and have the stream ignore a cached terminal snapshot when the fresh DB status is non-terminal. **Regression:** create a failed run with a cached terminal snapshot, call `/resume`, immediately reconnect to `/stream`, assert no stale `end` is emitted while the runner is active. *(F2/F4 confirmed closed and F1/F3 deferrals accepted by the same re-review; verdict needs-attention solely on this finding.)*
 - [ ] SSE emits the final `{event:"end", status}` for terminal `degraded`/`failed` too.
 - [ ] Error taxonomy → HTTP: transient → 503 + retry-after; validation → 422; degraded → 200 + `degraded:true`; not-found → 404.
 - [ ] `GET /sessions/{id}` returns the partial report + `status` + `degraded`; the UI renders partial sections under a **degraded banner**, plus generic loading/error states.
