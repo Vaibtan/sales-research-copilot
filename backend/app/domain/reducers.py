@@ -20,16 +20,35 @@ def merge_by_id(left: list[Source] | None, right: list[Source] | None) -> list[S
     return list(merged.values())
 
 
-def merge_assignments(
+def supersede_assignments_by_question(
     left: list[QuestionSource] | None, right: list[QuestionSource] | None
 ) -> list[QuestionSource]:
-    """Dedupe (question_id, source_id) links (idempotent under concurrent gather)."""
-    seen: dict[tuple[str, str], QuestionSource] = {
-        (a.question_id, a.source_id): a for a in (left or [])
-    }
-    for assignment in right or []:
-        seen[(assignment.question_id, assignment.source_id)] = assignment
-    return list(seen.values())
+    """Supersede (question → source) links per question by attempt — the mirror of
+    :func:`supersede_by_question` for the gather→extract working channel (Codex F1).
+
+    Same-attempt links accumulate (concurrent gather / multiple sources per
+    question) and dedupe by ``(question_id, source_id)``; a higher attempt (a
+    loop-back re-research) drops that question's *older* links so ``extract`` never
+    re-runs over a weak question's stale predecessor sources. Untouched questions
+    keep their links.
+    """
+    incoming = right or []
+    if not incoming:
+        return list(left or [])
+
+    max_attempt: dict[str, int] = {}
+    for a in incoming:
+        max_attempt[a.question_id] = max(max_attempt.get(a.question_id, a.attempt), a.attempt)
+
+    result: dict[tuple[str, str], QuestionSource] = {}
+    for a in left or []:
+        superseding = max_attempt.get(a.question_id)
+        if superseding is not None and a.attempt < superseding:
+            continue  # dropped — an older link for a re-researched question
+        result[(a.question_id, a.source_id)] = a
+    for a in incoming:
+        result[(a.question_id, a.source_id)] = a
+    return list(result.values())
 
 
 def supersede_by_question(

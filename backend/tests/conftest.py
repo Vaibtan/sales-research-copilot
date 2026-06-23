@@ -29,6 +29,12 @@ os.environ.setdefault(
 )
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
+# Hermetic provider selection: force the *mock* backends regardless of any
+# OPENAI_API_KEY / TAVILY_API_KEY in the developer's shell, so the suite never
+# makes a live provider call. (Empty string is falsy and overrides .env.)
+os.environ["OPENAI_API_KEY"] = ""
+os.environ["TAVILY_API_KEY"] = ""
+
 
 @pytest.fixture(scope="session")
 def settings() -> Settings:

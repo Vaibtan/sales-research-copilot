@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.domain.models import Fact, QuestionSource, Source
-from app.domain.reducers import merge_assignments, merge_by_id, supersede_by_question
+from app.domain.reducers import (
+    merge_by_id,
+    supersede_assignments_by_question,
+    supersede_by_question,
+)
 from app.domain.sections import FreshnessClass, Section
 
 
@@ -53,14 +57,33 @@ def test_merge_by_id_handles_empty_left() -> None:
     assert merge_by_id(None, [_source("a", "http://a")]) == [_source("a", "http://a")]
 
 
-def test_merge_assignments_dedupes_pairs() -> None:
-    left = [QuestionSource(question_id="q1", source_id="s1")]
+def test_supersede_assignments_dedupes_same_attempt_pairs() -> None:
+    left = [QuestionSource(question_id="q1", source_id="s1", attempt=1)]
     right = [
-        QuestionSource(question_id="q1", source_id="s1"),  # dup
-        QuestionSource(question_id="q1", source_id="s2"),
+        QuestionSource(question_id="q1", source_id="s1", attempt=1),  # dup
+        QuestionSource(question_id="q1", source_id="s2", attempt=1),
     ]
-    merged = merge_assignments(left, right)
-    assert len(merged) == 2
+    merged = supersede_assignments_by_question(left, right)
+    assert {(a.question_id, a.source_id) for a in merged} == {("q1", "s1"), ("q1", "s2")}
+
+
+def test_supersede_assignments_drops_old_attempt_for_reresearched_question() -> None:
+    """F1: a loop-back (attempt 2) over a question drops that question's stale
+    attempt-1 links so extract never re-runs over the old sources — other
+    questions are untouched."""
+    left = [
+        QuestionSource(question_id="q1", source_id="old", attempt=1),
+        QuestionSource(question_id="q2", source_id="keep", attempt=1),
+    ]
+    right = [QuestionSource(question_id="q1", source_id="fresh", attempt=2)]
+
+    merged = supersede_assignments_by_question(left, right)
+
+    assert {(a.question_id, a.source_id) for a in merged} == {
+        ("q1", "fresh"),  # q1's attempt-2 link
+        ("q2", "keep"),  # q2 untouched
+    }
+    assert not any(a.source_id == "old" for a in merged)  # stale link dropped
 
 
 # --- supersede_by_question ---------------------------------------------------

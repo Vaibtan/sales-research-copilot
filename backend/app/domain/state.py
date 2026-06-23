@@ -20,7 +20,11 @@ from app.domain.models import (
     ResearchReport,
     Source,
 )
-from app.domain.reducers import merge_assignments, merge_by_id, supersede_by_question
+from app.domain.reducers import (
+    merge_by_id,
+    supersede_assignments_by_question,
+    supersede_by_question,
+)
 
 Status = Literal[
     "planning",
@@ -45,7 +49,7 @@ class ResearchState(TypedDict):
 
     plan: ResearchPlan | None
     sources: Annotated[list[Source], merge_by_id]
-    assignments: Annotated[list[QuestionSource], merge_assignments]
+    assignments: Annotated[list[QuestionSource], supersede_assignments_by_question]
     facts: Annotated[list[Fact], supersede_by_question]
     draft: DraftReport | None
     report: ResearchReport | None

@@ -41,7 +41,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await run_migrations(db)
 
     checkpointer = await build_checkpointer(settings.database_url)
-    llm, search = build_providers(settings)
+    providers = build_providers(settings)
+    if providers.verify is not None:
+        # Fail fast on an unknown/unavailable model id before serving (§16).
+        await providers.verify()
     ledger = CallLedger(
         db,
         LedgerConfig(
@@ -52,13 +55,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ),
     )
     graph = build_graph(
-        llm=llm,
-        search=search,
+        llm=providers.llm,
+        search=providers.search,
         db=db,
         checkpointer=checkpointer.saver,
         max_extra_passes=settings.max_extra_passes,
         quality_threshold=settings.quality_threshold,
         ledger=ledger,
+        model_meta=providers.model_meta,
+        retry_max_attempts=settings.retry_max_attempts,
     )
     progress_bus = ProgressBus(cache)
     runner = GraphRunner(graph, db, progress_bus)
@@ -68,6 +73,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.checkpointer = checkpointer
     app.state.progress_bus = progress_bus
     app.state.runner = runner
+    app.state.providers = providers
+    app.state.embeddings = providers.embeddings
+    app.state.ledger = ledger
     app.state.session_service = SessionService(
         db, runner, max_extra_passes=settings.max_extra_passes
     )

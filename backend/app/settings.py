@@ -60,9 +60,35 @@ class Settings(BaseSettings):
     ledger_poll_seconds: float = 0.25  # waiter re-check cadence (single-flight)
     ledger_wait_timeout_seconds: float = 120.0  # max single-flight wait
 
-    # --- Providers (unused in slice 1; wired in slice 7) -----------------
+    # --- Providers (real backends wired in slice 7) ----------------------
     openai_api_key: str | None = None
     tavily_api_key: str | None = None
+    openai_base_url: str | None = None  # optional gateway/proxy override
+    verify_models_on_boot: bool = True  # fail-fast on an unknown model id (§16)
+
+    # Per-node model ids (config placeholders verified at boot; §0/§16). The
+    # analyze synthesis step can step up to a stronger model via config alone (§15).
+    model_plan: str = "gpt-5-nano"
+    model_extract: str = "gpt-5-nano"
+    model_analyze: str = "gpt-5"
+    model_quality: str = "gpt-5-nano"
+    model_chat: str = "gpt-5-nano"
+    model_embedding: str = "text-embedding-3-small"
+
+    # Per-node output token caps (cost control, §6.4).
+    max_output_tokens_plan: int = 1024
+    max_output_tokens_extract: int = 512
+    max_output_tokens_analyze: int = 4096
+    max_output_tokens_quality: int = 512
+    max_output_tokens_chat: int = 1024
+
+    # Network-bound node retries + SSRF-guarded fetch (§7, §11).
+    retry_max_attempts: int = 3
+    search_depth: Literal["basic", "advanced"] = "basic"
+    fetch_enrich: bool = True
+    fetch_timeout_seconds: float = 10.0
+    fetch_max_bytes: int = 2_000_000
+    allow_private_fetch: bool = False  # SSRF escape hatch (tests/dev only)
 
     @field_validator("cors_origins", mode="before")
     @classmethod

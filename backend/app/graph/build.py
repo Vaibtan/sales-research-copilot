@@ -15,6 +15,7 @@ from __future__ import annotations
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import RetryPolicy
 
 from app.db.ledger import CallLedger
 from app.domain.state import ResearchState
@@ -30,6 +31,7 @@ from app.graph.nodes import (
 )
 from app.infra.database import Database
 from app.providers.base import LLMClient, SearchProvider
+from app.providers.errors import is_transient
 from app.providers.ledger import LedgerLLMClient
 
 
@@ -42,6 +44,8 @@ def build_graph(
     max_extra_passes: int,
     quality_threshold: float,
     ledger: CallLedger | None = None,
+    model_meta: dict | None = None,
+    retry_max_attempts: int = 3,
 ) -> CompiledStateGraph:
     # Route every LLM call through the durable ledger (§6.5) so a mid-node kill
     # re-pays nothing on resume. When no ledger is supplied (some unit tests) the
@@ -49,13 +53,31 @@ def build_graph(
     if ledger is not None:
         llm = LedgerLLMClient(llm, ledger)
 
+    # Network-bound nodes retry transient failures (PRD §7, §11). The predicate
+    # only matches transient provider/network errors; deterministic mocks never
+    # raise these, so the policy is a no-op under tests. The ledger underneath
+    # means a retried node never re-pays an already-committed call.
+    net_retry = RetryPolicy(max_attempts=retry_max_attempts, retry_on=is_transient)
+
     builder = StateGraph(ResearchState)
 
-    builder.add_node("plan", make_plan_node(llm))
+    builder.add_node("plan", make_plan_node(llm), retry_policy=net_retry)
     builder.add_node("recall", make_recall_node())
-    builder.add_node("gather", make_gather_node(search))
-    builder.add_node("extract", make_extract_node(llm, max_extra_passes=max_extra_passes))
-    builder.add_node("analyze", make_analyze_node(llm, max_extra_passes=max_extra_passes))
+    builder.add_node(
+        "gather",
+        make_gather_node(search, max_extra_passes=max_extra_passes),
+        retry_policy=net_retry,
+    )
+    builder.add_node(
+        "extract",
+        make_extract_node(llm, max_extra_passes=max_extra_passes),
+        retry_policy=net_retry,
+    )
+    builder.add_node(
+        "analyze",
+        make_analyze_node(llm, max_extra_passes=max_extra_passes),
+        retry_policy=net_retry,
+    )
     builder.add_node(
         "quality_gate",
         make_quality_node(
@@ -63,7 +85,7 @@ def build_graph(
         ),
     )
     builder.add_node("report", report_node)
-    builder.add_node("persist", make_persist_node(db))
+    builder.add_node("persist", make_persist_node(db, model_meta=model_meta))
 
     builder.add_edge(START, "plan")
     builder.add_edge("plan", "recall")

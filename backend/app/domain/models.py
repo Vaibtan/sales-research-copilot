@@ -58,10 +58,17 @@ class Source(BaseModel):
 class QuestionSource(BaseModel):
     """A (question → source) assignment produced by ``gather``, consumed by
     ``extract``. A source can answer multiple questions, so this link lives
-    outside ``Source`` itself."""
+    outside ``Source`` itself.
+
+    ``attempt`` records which gather pass emitted the link so a loop-back can
+    *supersede* a question's older assignments (Codex F1) — without it, a
+    re-research over *changed* real sources would re-extract over the weak
+    question's stale attempt-1 sources too.
+    """
 
     question_id: str
     source_id: str
+    attempt: int = 1
 
 
 class ExtractedClaim(BaseModel):

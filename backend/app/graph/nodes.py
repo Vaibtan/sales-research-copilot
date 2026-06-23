@@ -90,10 +90,11 @@ def make_recall_node():
     return recall
 
 
-def make_gather_node(search: SearchProvider):
+def make_gather_node(search: SearchProvider, *, max_extra_passes: int):
     async def gather(state: ResearchState) -> dict:
         plan = state["plan"]
         assert plan is not None
+        attempt = max_extra_passes - state["retries_left"] + 1
         weak = set(state.get("weak_questions") or [])
         # Slice 4 loop-back: re-research only weak questions; else all.
         questions = [q for q in plan.questions if not weak or q.id in weak]
@@ -116,8 +117,12 @@ def make_gather_node(search: SearchProvider):
                         fetched_at=_now(),
                     )
                 )
+                # Stamp the attempt so a loop-back supersedes this question's older
+                # links (Codex F1) — extract then re-runs only over the fresh hits.
                 assignments.append(
-                    QuestionSource(question_id=question.id, source_id=sid)
+                    QuestionSource(
+                        question_id=question.id, source_id=sid, attempt=attempt
+                    )
                 )
         return {"sources": sources, "assignments": assignments, "status": "gathering"}
 
@@ -240,36 +245,47 @@ async def report_node(state: ResearchState) -> dict:
     draft = state["draft"]
     assert draft is not None
     quality = state["quality"]
+    # Derive the served Sources from surviving fact citations (Codex F1): a
+    # loop-back can leave a superseded source in the `sources` channel (merge_by_id
+    # never drops), but if no surviving fact cites it, it must not reach the report
+    # — and `persist`'s replacement then prunes it from the DB.
+    cited = {f.source_id for f in state["facts"]}
+    sources = [s for s in state["sources"] if s.id in cited]
     final = ResearchReport(
         sections=draft.sections,
         unknowns=draft.unknowns,
-        sources=state["sources"],
+        sources=sources,
         quality_score=quality.score if quality else None,
     )
     return {"report": final, "status": "reporting"}
 
 
-def make_persist_node(db: Database):
+def make_persist_node(db: Database, *, model_meta: dict | None = None):
+    meta = model_meta or {"providers": "mock"}
+
     async def persist(state: ResearchState) -> dict:
         report = state["report"]
         assert report is not None
         degraded = state["degraded"]
         status = "degraded" if degraded else "done"
+        # The report's Sources are the cited set (report_node derived them); persist
+        # that set so the full-materialization replacement prunes any source the
+        # loop-back left uncited (Codex F1).
         await persist_results(
             db,
             session_id=state["session_id"],
-            sources=state["sources"],
+            sources=report.sources,
             facts=state["facts"],
             report=report,
             status=status,
             degraded=degraded,
-            model_meta={"providers": "mock"},
+            model_meta=meta,
         )
         log.info(
             "graph.persisted",
             session_id=state["session_id"],
             status=status,
-            sources=len(state["sources"]),
+            sources=len(report.sources),
             facts=len(state["facts"]),
         )
         return {"status": status}
