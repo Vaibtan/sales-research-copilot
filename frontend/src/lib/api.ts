@@ -87,6 +87,25 @@ export async function listSessions(
   return body.sessions
 }
 
+export interface ResumeResponse {
+  session_id: string
+  status: string
+  /** False when the run was already finished (resume was a no-op). */
+  resumed: boolean
+}
+
+/**
+ * Resume a degraded/failed/interrupted run from its last checkpoint to attempt an
+ * upgrade (PRD §9.1). A `done` run is a no-op (`resumed: false`).
+ */
+export async function resumeSession(id: string): Promise<ResumeResponse> {
+  const res = await fetch(`${API_BASE_URL}/sessions/${id}/resume`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw await parseError(res)
+  return (await res.json()) as ResumeResponse
+}
+
 /** URL of the live-progress SSE stream for a session (consumed via EventSource). */
 export function sessionStreamUrl(id: string): string {
   return `${API_BASE_URL}/sessions/${id}/stream`

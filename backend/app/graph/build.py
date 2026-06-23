@@ -21,6 +21,7 @@ from app.db.ledger import CallLedger
 from app.domain.state import ResearchState
 from app.graph.nodes import (
     make_analyze_node,
+    make_error_handler,
     make_extract_node,
     make_gather_node,
     make_persist_node,
@@ -61,22 +62,28 @@ def build_graph(
 
     builder = StateGraph(ResearchState)
 
+    # plan failure → no error_handler → the run fails (no usable report, §9.1).
     builder.add_node("plan", make_plan_node(llm), retry_policy=net_retry)
     builder.add_node("recall", make_recall_node())
+    # gather/extract/analyze failures (after retries) degrade to an honest partial
+    # report via the error_handler instead of aborting (§6.1).
     builder.add_node(
         "gather",
         make_gather_node(search, max_extra_passes=max_extra_passes),
         retry_policy=net_retry,
+        error_handler=make_error_handler("gather"),
     )
     builder.add_node(
         "extract",
         make_extract_node(llm, max_extra_passes=max_extra_passes),
         retry_policy=net_retry,
+        error_handler=make_error_handler("extract"),
     )
     builder.add_node(
         "analyze",
         make_analyze_node(llm, max_extra_passes=max_extra_passes),
         retry_policy=net_retry,
+        error_handler=make_error_handler("analyze"),
     )
     builder.add_node(
         "quality_gate",

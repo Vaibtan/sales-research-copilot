@@ -117,11 +117,25 @@ async def stream_session(session_id: str, request: Request) -> StreamingResponse
         # gap between snapshot and the first live message.
         async with bus.subscribe(session_id) as pubsub:
             snapshot = await bus.latest(session_id) or _synthesize(detail)
-            yield _sse("progress", snapshot.model_dump_json())
-            if snapshot.terminal:
-                yield _sse("end", json.dumps({"status": snapshot.status}))
-                return
 
+            if snapshot.terminal:
+                # F5: a cached *terminal* snapshot is only trustworthy if the DB
+                # still agrees it's terminal. A resume may have flipped the status
+                # non-terminal (and is about to publish a fresh "resumed" snapshot);
+                # replaying the stale `end` here would close the stream while the
+                # upgrade runs. Re-check the fresh status before honoring it.
+                fresh = await service.get_detail(session_id)
+                if fresh is None or fresh.status in _TERMINAL:
+                    yield _sse("progress", snapshot.model_dump_json())
+                    yield _sse("end", json.dumps({"status": snapshot.status}))
+                    return
+                # DB is non-terminal → ignore the stale terminal snapshot and show a
+                # live view (the resumed snapshot if cached, else a synthesized one).
+                snapshot = await bus.latest(session_id)
+                if snapshot is None or snapshot.terminal:
+                    snapshot = _synthesize(fresh)
+
+            yield _sse("progress", snapshot.model_dump_json())
             last_step = snapshot.step
             while True:
                 if await request.is_disconnected():

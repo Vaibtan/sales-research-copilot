@@ -14,6 +14,8 @@ export interface LiveSession {
   status: string | null
   loading: boolean
   error: string | null
+  /** Re-fetch detail and re-attach the live stream (e.g. after a resume). */
+  reload: () => void
 }
 
 /**
@@ -30,6 +32,9 @@ export function useLiveSession(id: string): LiveSession {
   const [progress, setProgress] = useState<ProgressEvent | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Bumped by reload() to re-run the effect (re-fetch + re-open the stream) after
+  // a resume flips a terminal run back to in-flight.
+  const [reloadKey, setReloadKey] = useState(0)
   const lastStep = useRef(Number.NEGATIVE_INFINITY)
 
   useEffect(() => {
@@ -78,10 +83,14 @@ export function useLiveSession(id: string): LiveSession {
       active = false
       es.close()
     }
-  }, [id])
+  }, [id, reloadKey])
 
   const status = progress?.status ?? detail?.status ?? null
-  return { detail, progress, status, loading, error }
+  const reload = () => {
+    setProgress(null)
+    setReloadKey((k) => k + 1)
+  }
+  return { detail, progress, status, loading, error, reload }
 }
 
 export { isTerminal }

@@ -78,21 +78,31 @@ class GraphRunner:
         """Begin a fresh run (input = the initial state)."""
         self._spawn(session_id, initial_state)
 
-    async def resume(self, session_id: str) -> bool:
-        """Re-enter a run from its last checkpoint to attempt an upgrade (§9.1).
+    async def resume(
+        self, session_id: str, *, fresh_state: ResearchState | None = None
+    ) -> bool:
+        """Re-enter a run to attempt an upgrade (§9.1; Codex F3/F5).
 
         Single-flight: the ``_active`` check-and-reserve happens **synchronously,
         before any ``await``**, so two concurrent resumes can't both observe the
         thread idle and double-drive one ``thread_id`` (which would corrupt its
         checkpoint). A duplicate while a run is live raises :class:`SessionBusyError`.
-        The reservation is released here only when no executor is spawned (no-op or
-        failure); once spawned, the run's done-callback owns the release.
+        The reservation is released here only when no executor is spawned.
 
-        Returns ``False`` (a no-op) when the checkpoint is already at ``END`` — so
-        resuming a ``done`` run does nothing. Otherwise marks the session with its
-        in-flight phase (so a reconnecting stream shows progress, not a stuck
-        terminal) and re-enters with ``None`` input, which continues without
-        re-executing completed nodes.
+        Three cases by checkpoint state:
+        * ``next`` non-empty (killed mid-run) → re-enter with ``None`` input, which
+          continues without re-executing completed nodes.
+        * ``next`` empty but ``fresh_state`` given (a ``degraded``/``failed`` run that
+          reached END) → re-invoke from a fresh initial state to attempt an upgrade.
+          Completed LLM calls are cached by the ledger, so only the failed work is
+          re-paid (Codex F3 — the caller gates ``done`` to a no-op before getting here).
+        * ``next`` empty and no ``fresh_state`` → no-op (returns ``False``).
+
+        F5: before returning it sets a non-terminal DB status **and** replaces the
+        cached SSE snapshot with a non-terminal "resumed" one, and starts the new
+        run's step counter **above** the previous latest — so a reconnecting stream
+        never replays the stale terminal snapshot/``end`` and never hides resumed
+        progress behind the prior run's higher step.
         """
         if session_id in self._active:
             raise SessionBusyError(session_id)
@@ -101,23 +111,48 @@ class GraphRunner:
         try:
             config = {"configurable": {"thread_id": session_id}}
             snapshot = await self._graph.aget_state(config)
-            if not snapshot.next:
-                return False
-            phase = snapshot.values.get("status", "recalling")
-            if phase in _TERMINAL:  # defensive — a non-empty `next` shouldn't be terminal
-                phase = "recalling"
+            if snapshot.next:
+                graph_input: ResearchState | None = None
+                phase = snapshot.values.get("status", "recalling")
+                if phase in _TERMINAL:  # defensive — a live `next` shouldn't be terminal
+                    phase = "recalling"
+            elif fresh_state is not None:
+                graph_input = fresh_state  # fresh upgrade attempt from END
+                phase = "planning"
+            else:
+                return False  # at END, no upgrade requested → no-op
+
+            # Continue the step sequence above the previous latest so resumed
+            # progress is never filtered as stale (F5).
+            prev = await self._bus.latest(session_id)
+            base = (prev.step + 1) if prev is not None else 0
+
             await set_session_status(self._db, session_id=session_id, status=phase)
-            self._spawn(session_id, None)
+            # Invalidate the cached terminal snapshot with a non-terminal one
+            # *before* returning, so a reconnect can't serve the stale `end` (F5).
+            await self._publish(
+                ProgressEvent(
+                    session_id=session_id, step=base, status=phase, terminal=False
+                )
+            )
+            self._spawn(session_id, graph_input, start_step=base + 1)
             spawned = True
             return True
         finally:
             if not spawned:
                 self._active.discard(session_id)
 
-    def _spawn(self, session_id: str, graph_input: ResearchState | None) -> None:
+    def _spawn(
+        self,
+        session_id: str,
+        graph_input: ResearchState | None,
+        *,
+        start_step: int = 0,
+    ) -> None:
         self._active.add(session_id)
         task = asyncio.create_task(
-            self._run(session_id, graph_input), name=f"graph-run:{session_id}"
+            self._run(session_id, graph_input, start_step=start_step),
+            name=f"graph-run:{session_id}",
         )
         self._tasks.add(task)
 
@@ -127,9 +162,15 @@ class GraphRunner:
 
         task.add_done_callback(_finish)
 
-    async def _run(self, session_id: str, graph_input: ResearchState | None) -> None:
+    async def _run(
+        self,
+        session_id: str,
+        graph_input: ResearchState | None,
+        *,
+        start_step: int = 0,
+    ) -> None:
         config = {"configurable": {"thread_id": session_id}}
-        step = 0
+        step = start_step
         try:
             async for state in self._graph.astream(
                 graph_input, config=config, stream_mode="values"

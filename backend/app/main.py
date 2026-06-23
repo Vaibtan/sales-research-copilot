@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
+from app.api.errors import register_exception_handlers
 from app.api.routes import health, sessions
 from app.db.ledger import CallLedger, LedgerConfig
 from app.db.migrator import run_migrations
@@ -110,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    register_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(sessions.router)
     return app

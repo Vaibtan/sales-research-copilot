@@ -1,13 +1,15 @@
+import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ProgressView } from '../components/ProgressView'
 import { ReportView } from '../components/ReportView'
 import { StatusBadge } from '../components/StatusBadge'
 import { isTerminal, useLiveSession } from '../hooks/useLiveSession'
+import { resumeSession } from '../lib/api'
 import type { ProgressEvent, SessionDetail } from '../types'
 
 export function SessionDetailPage() {
   const { id = '' } = useParams()
-  const { detail, progress, status, loading, error } = useLiveSession(id)
+  const { detail, progress, status, loading, error, reload } = useLiveSession(id)
 
   if (loading) {
     return <CenteredNote>Loading session…</CenteredNote>
@@ -26,6 +28,7 @@ export function SessionDetailPage() {
   const effectiveStatus = status ?? detail.status
   const terminal = isTerminal(effectiveStatus)
   const degraded = detail.degraded || progress?.degraded || false
+  const failed = effectiveStatus === 'failed'
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -33,14 +36,26 @@ export function SessionDetailPage() {
 
       {degraded && (
         <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-200">
-          This briefing is <strong>partial</strong> — some research steps failed
-          after retries. Unknowns capture what could not be grounded.
+          <p>
+            This briefing is <strong>partial</strong> — some research steps failed
+            after retries. Unknowns capture what could not be grounded.
+          </p>
+          {terminal && (
+            <ResumeButton id={id} onResumed={reload} label="Retry the failed steps" />
+          )}
         </div>
       )}
 
       <div className="mt-8">
         {terminal && detail.report ? (
           <ReportView report={detail.report} />
+        ) : terminal && failed ? (
+          <CenteredNote tone="error">
+            The run failed before producing a briefing.
+            <div className="mt-4">
+              <ResumeButton id={id} onResumed={reload} label="Resume the run" />
+            </div>
+          </CenteredNote>
         ) : terminal && !detail.report ? (
           <CenteredNote tone="error">
             No report was produced for this run.
@@ -49,6 +64,49 @@ export function SessionDetailPage() {
           <Running progress={progress} />
         )}
       </div>
+    </div>
+  )
+}
+
+function ResumeButton({
+  id,
+  onResumed,
+  label,
+}: {
+  id: string
+  onResumed: () => void
+  label: string
+}) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function onClick() {
+    setBusy(true)
+    setErr(null)
+    try {
+      const { resumed } = await resumeSession(id)
+      // Re-attach the live stream so the upgrade renders (resumed=false → no-op,
+      // a reload still refreshes the latest detail).
+      onResumed()
+      if (!resumed) setErr('Nothing to resume — the run already completed.')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not resume the run')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={busy}
+        className="inline-flex items-center rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-100 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {busy ? 'Resuming…' : label}
+      </button>
+      {err && <p className="mt-2 text-xs text-rose-300">{err}</p>}
     </div>
   )
 }

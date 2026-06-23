@@ -55,12 +55,18 @@ class SessionService:
         return await repository.get_session_detail(self._db, session_id)
 
     async def resume(self, session_id: str) -> tuple[str, bool] | None:
-        """Attempt to re-enter a run from its checkpoint (PRD §9.1).
+        """Attempt to re-enter a run from its checkpoint (PRD §9.1, Codex F3).
 
         Returns ``None`` if the session is unknown (→ 404). Otherwise returns the
         post-resume ``(status, resumed)``: ``resumed`` is ``False`` for an
         already-finished run (no-op). Raises :class:`SessionBusyError` if the run
         is still executing in this process (→ 409).
+
+        The no-op gate is on the **persisted status** ``done`` (Codex F3) — *not* on
+        the checkpoint being at END — so a ``degraded``/``failed`` run that ran all
+        the way to END (error_handler → report → persist) is still upgradable. For
+        that case we hand the runner a fresh initial state to re-attempt from START;
+        the ledger means successful nodes aren't re-paid.
         """
         detail = await repository.get_session_detail(self._db, session_id)
         if detail is None:
@@ -69,9 +75,21 @@ class SessionService:
         # window where its executor is still flushing the final checkpoint.
         if detail.status == "done":
             return "done", False
+
+        # Fresh state to re-attempt a degraded/failed run that reached END. The
+        # runner uses it only when the checkpoint has no remaining work; a killed
+        # mid-run (next non-empty) is continued from its checkpoint instead.
+        fresh_state = build_initial_state(
+            session_id=session_id,
+            company=detail.company,
+            website=detail.website,
+            objective=detail.objective,
+            company_key=detail.company_key,
+            max_extra_passes=self._max_extra_passes,
+        )
         # No racy is_active() pre-check here: the runner reserves the session
         # atomically and raises SessionBusyError if a run is already live (F4).
-        resumed = await self._runner.resume(session_id)
+        resumed = await self._runner.resume(session_id, fresh_state=fresh_state)
         fresh = await repository.get_session_detail(self._db, session_id)
         status = fresh.status if fresh is not None else detail.status
         log.info("session.resume", session_id=session_id, resumed=resumed, status=status)

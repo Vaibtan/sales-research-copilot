@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 
+from langgraph.errors import NodeError
 from langgraph.types import Command
 
 from app.db.repository import persist_results
@@ -27,15 +28,18 @@ from app.domain.models import (
     DraftReport,
     ExtractedFacts,
     Fact,
+    NodeErrorRecord,
     Question,
     QuestionSource,
     QualityVerdict,
+    ReportItem,
+    ReportSection,
     ResearchPlan,
     ResearchPlanDraft,
     ResearchReport,
     Source,
 )
-from app.domain.sections import CONTENT_SECTIONS, freshness_for
+from app.domain.sections import CONTENT_SECTIONS, Section, freshness_for
 from app.domain.state import ResearchState
 from app.infra.database import Database
 from app.logging import get_logger
@@ -241,10 +245,41 @@ def make_quality_node(llm: LLMClient, *, quality_threshold: float, max_extra_pas
     return quality_gate
 
 
+def _degraded_draft(facts: list[Fact]) -> DraftReport:
+    """Assemble an honest partial draft directly from whatever facts survived when
+    ``analyze`` never produced one (degraded path, §6.1/§9.1) — sections with no
+    facts become Unknowns; nothing is fabricated."""
+    by_section: dict[Section, list[Fact]] = {s: [] for s in CONTENT_SECTIONS}
+    for fact in facts:
+        by_section[fact.section].append(fact)
+    sections: list[ReportSection] = []
+    unknowns: list[str] = []
+    for section in CONTENT_SECTIONS:
+        section_facts = by_section[section]
+        if not section_facts:
+            unknowns.append(
+                f"No grounded information available for {section.value} "
+                "(a research step did not complete)."
+            )
+            continue
+        sections.append(
+            ReportSection(
+                section=section,
+                items=[
+                    ReportItem(text=f.claim, source_ids=[f.source_id])
+                    for f in section_facts
+                ],
+            )
+        )
+    return DraftReport(sections=sections, unknowns=unknowns)
+
+
 async def report_node(state: ResearchState) -> dict:
-    draft = state["draft"]
-    assert draft is not None
-    quality = state["quality"]
+    # Degraded path: an error_handler may route here with no draft (gather/extract/
+    # analyze failed) — assemble an honest partial from the surviving facts rather
+    # than crash, so a partial run still yields a (cited) report, never a 500.
+    draft = state.get("draft") or _degraded_draft(state["facts"])
+    quality = state.get("quality")
     # Derive the served Sources from surviving fact citations (Codex F1): a
     # loop-back can leave a superseded source in the `sources` channel (merge_by_id
     # never drops), but if no surviving fact cites it, it must not reach the report
@@ -258,6 +293,38 @@ async def report_node(state: ResearchState) -> dict:
         quality_score=quality.score if quality else None,
     )
     return {"report": final, "status": "reporting"}
+
+
+def make_error_handler(node: str):
+    """Build an ``error_handler`` (langgraph ≥1.2) that converts a node failure —
+    *after* its RetryPolicy is exhausted — into a degraded run: route to ``report``
+    with ``degraded=True`` and record the error, so the graph yields an honest
+    partial report instead of aborting (PRD §6.1, never a 500)."""
+
+    def handle(state: ResearchState, error: NodeError) -> Command:
+        original = getattr(error, "error", error)
+        log.warning(
+            "graph.node_degraded",
+            node=node,
+            session_id=state["session_id"],
+            error_type=type(original).__name__,
+        )
+        return Command(
+            goto="report",
+            update={
+                "degraded": True,
+                "status": "reporting",
+                "errors": [
+                    NodeErrorRecord(
+                        node=node,
+                        error_type=type(original).__name__,
+                        message=str(original)[:500],
+                    )
+                ],
+            },
+        )
+
+    return handle
 
 
 def make_persist_node(db: Database, *, model_meta: dict | None = None):
