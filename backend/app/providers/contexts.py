@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from app.domain.models import DraftReport, Fact, Question, Source
+from app.domain.models import ChatPassage, ChatTurn, DraftReport, Fact, Question, Source
 from app.domain.sections import Section
 
 
@@ -43,3 +43,12 @@ class QualityContext(BaseModel):
     # (its ``weak_questions`` are returned as ``question_id``s).
     questions: list[Question]
     attempt: int = 1
+
+
+class ChatContext(BaseModel):
+    """Grounded-chat answer input: the question, the retrieved passages (the only
+    knowledge the answer may use), and the recent conversation turns."""
+
+    question: str
+    passages: list[ChatPassage]
+    history: list[ChatTurn]

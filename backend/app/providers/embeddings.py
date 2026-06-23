@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from app.providers.base import CallSite
@@ -60,8 +61,10 @@ class OpenAIEmbeddingClient:
 
 
 class MockEmbeddingClient:
-    """Deterministic unit-norm vectors seeded by the text — stable across runs so
-    cosine similarity in tests is reproducible."""
+    """Deterministic **bag-of-words** unit vectors (the hashing trick): each word
+    maps to a dimension, so texts that share words get high cosine similarity. This
+    makes retrieval *semantically meaningful* in tests (a "products" question
+    surfaces the products chunk) while staying fully deterministic and offline."""
 
     def __init__(self, dim: int = EMBEDDING_DIM) -> None:
         self._dim = dim
@@ -76,13 +79,12 @@ class MockEmbeddingClient:
         return [self._vector(t) for t in texts]
 
     def _vector(self, text: str) -> list[float]:
-        # Expand a digest into `dim` floats, then L2-normalize.
-        raw: list[float] = []
-        counter = 0
-        while len(raw) < self._dim:
-            digest = hashlib.sha256(f"{text}\x1f{counter}".encode()).digest()
-            raw.extend(b / 255.0 - 0.5 for b in digest)
-            counter += 1
-        vec = raw[: self._dim]
-        norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+        vec = [0.0] * self._dim
+        for word in re.findall(r"[a-z0-9]+", text.lower()):
+            idx = int(hashlib.sha256(word.encode()).hexdigest(), 16) % self._dim
+            vec[idx] += 1.0
+        norm = math.sqrt(sum(x * x for x in vec))
+        if norm == 0.0:  # blank text — return a fixed unit vector, never zero-norm
+            vec[0] = 1.0
+            return vec
         return [x / norm for x in vec]

@@ -17,8 +17,11 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (
+    ChatMessageOut,
+    ChatRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    MessagesResponse,
     ResumeResponse,
     SessionDetailResponse,
     SessionHistoryResponse,
@@ -27,6 +30,7 @@ from app.api.schemas import (
 from app.db.repository import SessionDetail
 from app.domain.models import ProgressEvent, ProgressSource
 from app.infra.events import ProgressBus
+from app.services.chat import ChatService
 from app.services.sessions import SessionBusyError, SessionService
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -43,6 +47,10 @@ def _service(request: Request) -> SessionService:
 
 def _bus(request: Request) -> ProgressBus:
     return request.app.state.progress_bus
+
+
+def _chat(request: Request) -> ChatService:
+    return request.app.state.chat_service
 
 
 @router.post(
@@ -98,6 +106,48 @@ async def resume_session(session_id: str, request: Request) -> ResumeResponse:
         raise HTTPException(status_code=404, detail="session not found")
     run_status, resumed = result
     return ResumeResponse(session_id=session_id, status=run_status, resumed=resumed)
+
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",  # disable proxy buffering (nginx)
+}
+
+
+@router.post(
+    "/{session_id}/chat",
+    summary="Grounded follow-up chat over the report (streamed SSE)",
+)
+async def chat(
+    session_id: str, body: ChatRequest, request: Request
+) -> StreamingResponse:
+    detail = await _service(request).get_detail(session_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if detail.report is None:
+        raise HTTPException(status_code=409, detail="report is not ready for chat yet")
+    stream = _chat(request).answer_stream(
+        session_id=session_id,
+        report_version=detail.report_version,
+        message=body.message,
+    )
+    return StreamingResponse(stream, media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@router.get(
+    "/{session_id}/messages",
+    response_model=MessagesResponse,
+    summary="Chat history for a session",
+)
+async def get_messages(session_id: str, request: Request) -> MessagesResponse:
+    detail = await _service(request).get_detail(session_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    messages = await _chat(request).history(session_id)
+    return MessagesResponse(
+        messages=[ChatMessageOut.from_message(m) for m in messages]
+    )
 
 
 @router.get(

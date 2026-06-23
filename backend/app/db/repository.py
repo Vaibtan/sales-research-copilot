@@ -17,8 +17,15 @@ from datetime import datetime
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from app.domain.identity import content_hash, report_id
-from app.domain.models import Fact, ResearchReport, Source
+from app.domain.identity import content_hash, new_message_id, report_id
+from app.domain.models import (
+    ChatMessage,
+    ChatPassage,
+    CitationSnapshot,
+    Fact,
+    ResearchReport,
+    Source,
+)
 from app.infra.database import Database
 
 
@@ -180,6 +187,16 @@ async def persist_results(
                 ),
             )
 
+            # Staleness signal (§8.1): any chat message grounded on an older report
+            # version is flagged stale, so the UI can warn it may cite changed
+            # sources. Idempotent — only flips messages below the current version.
+            await conn.execute(
+                "UPDATE messages SET stale = TRUE WHERE session_id = %s"
+                " AND stale = FALSE AND report_version IS NOT NULL"
+                " AND report_version < (SELECT version FROM reports WHERE session_id = %s)",
+                (session_id, session_id),
+            )
+
             # Prune first, then upsert the current set. Deleting a dropped source
             # cascades to its facts and source_chunks; the explicit fact delete
             # also removes a stale predecessor on a *surviving* source (e.g. a
@@ -339,3 +356,129 @@ async def get_session_detail(db: Database, session_id: str) -> SessionDetail | N
         report_version=row["report_version"],
         report_created_at=row["report_created_at"],
     )
+
+
+# --- chat (slice 10) ---------------------------------------------------------
+
+
+async def retrieve_chunks(
+    db: Database, *, session_id: str, query_vector: list[float], top_k: int
+) -> list[ChatPassage]:
+    """Top-k chunks (report + source) for a session by cosine distance to the
+    query embedding — the grounded-chat retrieval (§8). Source chunks carry their
+    ``source_id`` (citable); report chunks are synthesis context."""
+    vec = _vec_literal(query_vector)
+    async with db.pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT text, source_id, kind FROM ("
+                "  SELECT text, NULL::text AS source_id, 'report' AS kind,"
+                "    embedding <=> %s::vector AS dist"
+                "    FROM report_chunks WHERE session_id = %s"
+                "  UNION ALL"
+                "  SELECT text, source_id, 'source' AS kind,"
+                "    embedding <=> %s::vector AS dist"
+                "    FROM source_chunks WHERE session_id = %s"
+                ") q ORDER BY dist ASC LIMIT %s",
+                (vec, session_id, vec, session_id, top_k),
+            )
+            rows = await cur.fetchall()
+    return [
+        ChatPassage(text=r["text"], source_id=r["source_id"], kind=r["kind"])
+        for r in rows
+    ]
+
+
+async def resolve_citations(
+    db: Database, *, session_id: str, source_ids: list[str]
+) -> list[CitationSnapshot]:
+    """Snapshot the cited sources (url/title/snippet) from the *current* session
+    sources, in the order given — stored on the message so it resolves even if a
+    source is later dropped (§8.1)."""
+    if not source_ids:
+        return []
+    async with db.pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT id, url, title, snippet FROM sources"
+                " WHERE session_id = %s AND id = ANY(%s)",
+                (session_id, source_ids),
+            )
+            by_id = {r["id"]: r for r in await cur.fetchall()}
+    return [
+        CitationSnapshot(
+            source_id=sid,
+            url=by_id[sid]["url"],
+            title=by_id[sid]["title"],
+            snippet=by_id[sid]["snippet"],
+        )
+        for sid in source_ids
+        if sid in by_id
+    ]
+
+
+async def insert_message(
+    db: Database,
+    *,
+    session_id: str,
+    role: str,
+    content: str,
+    citations: list[CitationSnapshot],
+    report_version: int | None,
+) -> ChatMessage:
+    message_id = new_message_id()
+    payload = Jsonb([c.model_dump() for c in citations])
+    async with db.pool.connection() as conn:
+        cur = await conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, citations_jsonb,"
+            " report_version) VALUES (%s, %s, %s, %s, %s, %s)"
+            " RETURNING created_at",
+            (message_id, session_id, role, content, payload, report_version),
+        )
+        created_at = (await cur.fetchone())[0]
+        await conn.commit()
+    return ChatMessage(
+        id=message_id,
+        role=role,
+        content=content,
+        citations=citations,
+        report_version=report_version,
+        stale=False,
+        created_at=created_at,
+    )
+
+
+async def list_messages(db: Database, session_id: str) -> list[ChatMessage]:
+    async with db.pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT id, role, content, citations_jsonb, report_version, stale,"
+                " created_at FROM messages WHERE session_id = %s ORDER BY created_at",
+                (session_id,),
+            )
+            rows = await cur.fetchall()
+    return [
+        ChatMessage(
+            id=r["id"],
+            role=r["role"],
+            content=r["content"],
+            citations=[CitationSnapshot(**c) for c in (r["citations_jsonb"] or [])],
+            report_version=r["report_version"],
+            stale=r["stale"],
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
+
+
+async def recent_turns(db: Database, session_id: str, *, limit: int) -> list[dict]:
+    """The last ``limit`` turns (role/content), oldest-first, for chat context."""
+    async with db.pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT role, content FROM messages WHERE session_id = %s"
+                " ORDER BY created_at DESC LIMIT %s",
+                (session_id, limit),
+            )
+            rows = await cur.fetchall()
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]

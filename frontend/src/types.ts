@@ -80,6 +80,23 @@ export interface ProgressEvent {
   terminal: boolean
 }
 
+export interface Citation {
+  source_id: string
+  url: string
+  title: string
+  snippet: string
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  citations: Citation[]
+  report_version: number | null
+  stale: boolean
+  created_at: string
+}
+
 export const TERMINAL_STATUSES = ['done', 'degraded', 'failed'] as const
 
 /** Canonical render order of the seven content sections. */

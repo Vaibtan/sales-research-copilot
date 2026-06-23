@@ -7,6 +7,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 from app.db.repository import SessionDetail, SessionSummary
+from app.domain.models import ChatMessage
 from app.domain.sections import Section
 
 
@@ -99,6 +100,56 @@ class SessionSummaryOut(BaseModel):
 
 class SessionHistoryResponse(BaseModel):
     sessions: list[SessionSummaryOut]
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+
+class CitationOut(BaseModel):
+    source_id: str
+    url: str
+    title: str
+    snippet: str
+
+
+class ChatMessageOut(BaseModel):
+    id: str
+    role: str
+    content: str
+    citations: list[CitationOut]
+    report_version: int | None
+    stale: bool
+    created_at: datetime
+
+    @classmethod
+    def from_message(cls, m: ChatMessage) -> "ChatMessageOut":
+        return cls(
+            id=m.id,
+            role=m.role,
+            content=m.content,
+            citations=[
+                CitationOut(
+                    source_id=c.source_id, url=c.url, title=c.title, snippet=c.snippet
+                )
+                for c in m.citations
+            ],
+            report_version=m.report_version,
+            stale=m.stale,
+            created_at=m.created_at,
+        )
+
+
+class MessagesResponse(BaseModel):
+    messages: list[ChatMessageOut]
 
 
 class SessionDetailResponse(BaseModel):

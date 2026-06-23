@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { ChatPanel } from '../components/ChatPanel'
 import { ProgressView } from '../components/ProgressView'
 import { ReportView } from '../components/ReportView'
 import { StatusBadge } from '../components/StatusBadge'
@@ -48,7 +49,10 @@ export function SessionDetailPage() {
 
       <div className="mt-8">
         {terminal && detail.report ? (
-          <ReportView report={detail.report} />
+          <>
+            <ReportView report={detail.report} />
+            <ChatPanel sessionId={id} />
+          </>
         ) : terminal && failed ? (
           <CenteredNote tone="error">
             The run failed before producing a briefing.

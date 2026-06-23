@@ -126,6 +126,50 @@ class ResearchReport(BaseModel):
     quality_score: float | None = None
 
 
+# --- Chat (slice 10) ---------------------------------------------------------
+
+
+class ChatPassage(BaseModel):
+    """A retrieved chunk handed to the answer step. ``source_id`` is set for source
+    chunks (citable) and ``None`` for report chunks (synthesis context)."""
+
+    text: str
+    source_id: str | None = None
+    kind: str  # "report" | "source"
+
+
+class ChatTurn(BaseModel):
+    role: str
+    content: str
+
+
+class ChatAnswer(BaseModel):
+    """Answer step output: grounded prose + the source ids it cites."""
+
+    answer: str
+    source_ids: list[str] = Field(default_factory=list)
+
+
+class CitationSnapshot(BaseModel):
+    """A self-contained citation stored on a message (§8.1) — resolves even if the
+    source is later dropped by a regenerate."""
+
+    source_id: str
+    url: str
+    title: str
+    snippet: str
+
+
+class ChatMessage(BaseModel):
+    id: str
+    role: str
+    content: str
+    citations: list[CitationSnapshot] = Field(default_factory=list)
+    report_version: int | None = None
+    stale: bool = False
+    created_at: datetime
+
+
 # --- Quality / errors --------------------------------------------------------
 
 

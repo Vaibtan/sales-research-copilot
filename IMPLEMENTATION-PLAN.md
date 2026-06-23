@@ -366,12 +366,14 @@ PRD refs: §8 (chat loop), §8.1 (citation durability, stale signal), §9 (`/cha
 
 ### Acceptance criteria
 
-- [ ] `retrieve → answer` chat graph retrieves top-k chunks scoped to `session_id` + last N turns; active retrieval uses only **live** sources.
-- [ ] `POST /sessions/{id}/chat` streams the answer token-by-token; `GET /sessions/{id}/messages` returns history.
-- [ ] Answers **must cite `source_id`s**; out-of-scope questions return "not in the report" (no fabrication).
-- [ ] Each stored citation snapshots its source (`source_id` + `url` + `title` + `snippet`) at answer time, so `GET /messages` resolves even if that source is later dropped by a regenerate.
-- [ ] Each message records the `report_version` it was grounded on; messages grounded on an older version are flagged `stale=true`.
-- [ ] React chat UI: streamed answers, rendered citations, and a "report was updated — earlier answers may reference changed sources" notice for stale messages.
+- [x] `retrieve → answer` chat graph retrieves top-k chunks scoped to `session_id` + last N turns; active retrieval uses only **live** sources. *(`graph/chat.py` 2-node LangGraph; `retrieve_chunks` cosine `<=>` over `report_chunks` ∪ `source_chunks` scoped to the session (live via FK cascade); last 8 turns in `ChatContext`.)*
+- [x] `POST /sessions/{id}/chat` streams the answer token-by-token; `GET /sessions/{id}/messages` returns history. *(`ChatService.answer_stream` yields `token` SSE frames then a `done` frame; `get_messages` returns the ordered history. `test_chat_in_scope_answer_is_cited`, `test_messages_history_records_user_and_assistant`.)*
+- [x] Answers **must cite `source_id`s**; out-of-scope questions return "not in the report" (no fabrication). *(mock chat answers only from passages sharing a content word and *requires* a citable source; else declines. `test_chat_out_of_scope_declines`. Real CHAT prompt enforces the same.)*
+- [x] Each stored citation snapshots its source (`source_id` + `url` + `title` + `snippet`) at answer time, so `GET /messages` resolves even if that source is later dropped by a regenerate. *(`resolve_citations` snapshots into `citations_jsonb`; `test_citation_snapshot_survives_source_drop_and_marks_stale` drops every source then asserts the snapshot still resolves.)*
+- [x] Each message records the `report_version` it was grounded on; messages grounded on an older version are flagged `stale=true`. *(`persist_results` flips `stale` on messages below the current `reports.version` when it bumps; same test asserts `stale=true` after a regenerate.)*
+- [x] React chat UI: streamed answers, rendered citations, and a "report was updated — earlier answers may reference changed sources" notice for stale messages. *(`ChatPanel`: POST-SSE via `fetch` stream reader (EventSource is GET-only), optimistic bubbles, citation chips, per-message stale notice. tsc + vite build clean.)*
+
+> **Notes:** chat uses the **raw** providers (not ledgered — it isn't a resumable run). The mock embedding is a deterministic **bag-of-words** vector (hashing trick) so retrieval is semantically meaningful offline (a "products" question surfaces the products chunk). Backend suite **84 pass** (prior 79 + 5).
 
 ### Blocked by
 

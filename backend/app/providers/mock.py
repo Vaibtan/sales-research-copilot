@@ -16,11 +16,14 @@ from pydantic import BaseModel
 from app.providers.base import CallSite, LLMTask, SearchHit
 from app.providers.contexts import (
     AnalyzeContext,
+    ChatContext,
     ExtractContext,
     PlanContext,
     QualityContext,
 )
+from app.domain.identity import normalize_claim
 from app.domain.models import (
+    ChatAnswer,
     DraftReport,
     ExtractedClaim,
     ExtractedFacts,
@@ -31,6 +34,16 @@ from app.domain.models import (
     ResearchPlanDraft,
 )
 from app.domain.sections import CONTENT_SECTIONS, Section
+
+# Common words the deterministic chat ignores when deciding if a question is in
+# scope, so a generic phrasing ("what is the …") doesn't match every passage.
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "the", "is", "are", "was", "were", "of", "to", "for", "and",
+        "or", "in", "on", "at", "by", "with", "what", "who", "how", "does", "do",
+        "did", "this", "that", "s", "about", "tell", "me", "can", "you",
+    }
+)
 
 _QUESTION_TEMPLATES: dict[Section, str] = {
     Section.COMPANY_OVERVIEW: "What is {company}'s overview, mission, and size?",
@@ -109,6 +122,8 @@ class MockLLMClient:
                 return self._analyze(_as(context, AnalyzeContext))
             case LLMTask.QUALITY:
                 return self._quality(_as(context, QualityContext))
+            case LLMTask.CHAT:
+                return self._chat(_as(context, ChatContext))
         raise ValueError(f"unhandled task: {task}")  # pragma: no cover
 
     # -- handlers -------------------------------------------------------------
@@ -155,6 +170,27 @@ class MockLLMClient:
                 )
             )
         return DraftReport(sections=sections, unknowns=unknowns)
+
+    def _chat(self, ctx: ChatContext) -> ChatAnswer:
+        # Deterministic grounding: answer only from passages that share a
+        # *content* word with the question (stopwords ignored so a generic
+        # "what is the …" doesn't spuriously match), and *require* a citable
+        # source — otherwise honestly decline ("not in the report", §8).
+        q_words = set(normalize_claim(ctx.question).split()) - _STOPWORDS
+        relevant = [
+            p
+            for p in ctx.passages
+            if q_words & (set(normalize_claim(p.text).split()) - _STOPWORDS)
+        ]
+        cited = sorted({p.source_id for p in relevant if p.source_id})
+        if not cited:  # fall back to any retrieved source chunk
+            cited = sorted({p.source_id for p in ctx.passages if p.source_id})
+        if not relevant or not cited:
+            return ChatAnswer(
+                answer="That information is not in the report.", source_ids=[]
+            )
+        snippet = " ".join(relevant[0].text.split())[:200]
+        return ChatAnswer(answer=f"Based on the report: {snippet}", source_ids=cited)
 
     def _quality(self, ctx: QualityContext) -> QualityVerdict:
         idx = min(ctx.attempt - 1, len(self._quality_scores) - 1)

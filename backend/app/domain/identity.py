@@ -24,6 +24,12 @@ def new_session_id() -> str:
     return uuid4().hex
 
 
+def new_message_id() -> str:
+    """A chat message is genuinely new each turn (like a session), so it gets a
+    random id rather than a natural-key digest."""
+    return uuid4().hex
+
+
 def normalize_url(url: str) -> str:
     """Canonicalize a URL for dedup: lowercase scheme/host, drop default ports,
     strip trailing slash and fragment, keep the query (it identifies the page)."""

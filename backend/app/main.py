@@ -18,11 +18,11 @@ from app.api.errors import register_exception_handlers
 from app.api.routes import health, sessions
 from app.db.ledger import CallLedger, LedgerConfig
 from app.db.migrator import run_migrations
-from app.graph import GraphRunner, build_checkpointer, build_graph
+from app.graph import GraphRunner, build_chat_graph, build_checkpointer, build_graph
 from app.infra import Cache, Database, ProgressBus
 from app.logging import configure_logging, get_logger
 from app.providers import build_providers
-from app.services import SessionService
+from app.services import ChatService, SessionService
 from app.settings import Settings, get_settings
 
 log = get_logger(__name__)
@@ -69,6 +69,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     progress_bus = ProgressBus(cache)
     runner = GraphRunner(graph, db, progress_bus)
+    # Chat uses the raw providers (it is not part of the resumable research run, so
+    # not ledgered): retrieve → answer over the persisted pgvector chunks.
+    chat_graph = build_chat_graph(
+        llm=providers.llm, embeddings=providers.embeddings, db=db
+    )
 
     app.state.db = db
     app.state.cache = cache
@@ -81,6 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_service = SessionService(
         db, runner, max_extra_passes=settings.max_extra_passes
     )
+    app.state.chat_service = ChatService(db, chat_graph)
 
     log.info("app.startup", app=settings.app_name, environment=settings.environment)
     try:
