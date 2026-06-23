@@ -488,11 +488,13 @@ PRD refs: §0 (observability), §11 (observability), §12 (`--profile obs` topol
 
 ### Acceptance criteria
 
-- [ ] `docker compose --profile obs up` adds `langfuse` (+ its `clickhouse`/`minio`) without affecting the default `docker compose up`.
-- [ ] Each node and each LLM call emits an OTEL span with token/cost/latency attributes.
-- [ ] A completed run appears in Langfuse as a trace with per-node spans and token/cost data.
-- [ ] Structured JSON logs include `session_id` and `node` on every workflow log line, and tag errors by the §9 taxonomy.
-- [ ] Core dev/tests run with the obs profile **off** (no hard dependency on Langfuse).
+- [x] `docker compose --profile obs up` adds `langfuse` (+ its `clickhouse`/`minio`) without affecting the default `docker compose up`. *(langfuse-web/worker + langfuse-postgres + clickhouse + minio under `profiles: ["obs"]`; verified `docker compose config --services` = {api,postgres,redis,web} default vs +5 obs services with the profile.)*
+- [x] Each node and each LLM call emits an OTEL span with token/cost/latency attributes. *(`_instrument` wraps every node in `span("node.{name}")`; `LedgerLLMClient`/`LedgerEmbeddingClient` open `llm.{task}`/`embed` spans; `OpenAILLMClient` annotates the span with `llm.input_tokens`/`output_tokens`. Spans capture latency inherently; nodes also log `duration_ms`.)*
+- [ ] A completed run appears in Langfuse as a trace with per-node spans and token/cost data. *(**HITL/manual** — requires the obs profile + Langfuse running + keys, which CI doesn't run. The OTLP→Langfuse exporter + span instrumentation are built; a no-op exporter in tests means this is verified by inspection, not CI.)*
+- [x] Structured JSON logs include `session_id` and `node` on every workflow log line, and tag errors by the §9 taxonomy. *(`_instrument` binds `session_id`+`node` via structlog contextvars (merged into every line inside the node); `api/errors.py` tags each handler `taxonomy=transient|provider|validation`. `test_instrument_binds_contextvars_for_inner_logs`, `test_instrument_emits_node_log_with_session_and_duration`.)*
+- [x] Core dev/tests run with the obs profile **off** (no hard dependency on Langfuse). *(`otel_enabled` defaults False → `configure_tracing` leaves the no-op OTEL provider; spans/attrs are safe no-ops. `test_tracing_disabled_without_config`, `test_span_and_attrs_are_safe_without_provider`.)*
+
+> **Notes:** instrumented with the OTEL **API** everywhere so spans are cheap no-ops until `configure_tracing` installs the OTLP→Langfuse provider (lazy SDK import). Langfuse v3 ingests OTLP directly (`/api/public/otel/v1/traces`), so no langfuse SDK dep — just `opentelemetry-{api,sdk,exporter-otlp-proto-http}`. Langfuse reuses the shared redis (db 1) with its own postgres/clickhouse/minio. Backend suite **98 pass** (prior 92 + 6).
 
 ### Blocked by
 

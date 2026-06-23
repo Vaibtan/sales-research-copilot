@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from app.db.ledger import CallLedger, LedgerKey
 from app.domain.identity import content_hash
+from app.observability import span
 from app.providers.base import CallSite, LLMClient, LLMTask, T
 from app.providers.embeddings import EmbeddingClient
 
@@ -77,7 +78,14 @@ class LedgerLLMClient:
             )
             return result.model_dump(mode="json")
 
-        cached = await self._ledger.run(key, produce)
+        with span(
+            f"llm.{task.value}",
+            node=call.node,
+            session_id=call.session_id,
+            attempt=call.attempt,
+            model=model,
+        ):
+            cached = await self._ledger.run(key, produce)
         return output_type.model_validate(cached)
 
 
@@ -110,5 +118,11 @@ class LedgerEmbeddingClient:
             vectors = await self._inner.embed(texts, idempotency_key=idem)
             return {"vectors": vectors}
 
-        cached = await self._ledger.run(key, produce)
+        with span(
+            "embed",
+            node=call.node,
+            session_id=call.session_id,
+            count=len(texts),
+        ):
+            cached = await self._ledger.run(key, produce)
         return cached["vectors"]

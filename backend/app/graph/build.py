@@ -12,12 +12,17 @@ this skeleton.
 
 from __future__ import annotations
 
+import time
+
+import structlog
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
 
 from app.db.ledger import CallLedger
+from app.logging import get_logger
+from app.observability import span
 from app.domain.state import ResearchState
 from app.graph.nodes import (
     make_analyze_node,
@@ -37,6 +42,32 @@ from app.providers.base import LLMClient, SearchProvider
 from app.providers.embeddings import EmbeddingClient
 from app.providers.errors import is_transient
 from app.providers.ledger import LedgerEmbeddingClient, LedgerLLMClient
+
+log = get_logger(__name__)
+
+
+def _instrument(name: str, fn):
+    """Wrap a node so every workflow log line within it carries ``session_id`` +
+    ``node`` (structlog contextvars), it runs inside an OTEL span, and it emits a
+    ``graph.node`` line with ``duration_ms`` on completion (slice 14). The
+    concurrent fan-out is safe: each worker task has its own contextvar context."""
+
+    async def wrapped(state):
+        session_id = state.get("session_id") if isinstance(state, dict) else None
+        with structlog.contextvars.bound_contextvars(node=name, session_id=session_id):
+            with span(f"node.{name}", node=name, session_id=session_id):
+                start = time.perf_counter()
+                try:
+                    return await fn(state)
+                finally:
+                    log.info(
+                        "graph.node",
+                        node=name,
+                        session_id=session_id,
+                        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+                    )
+
+    return wrapped
 
 
 def build_graph(
@@ -73,62 +104,84 @@ def build_graph(
 
     builder = StateGraph(ResearchState)
 
+    # Every node is wrapped with `_instrument` (slice 14): structured per-node logs
+    # (session_id/node/duration) + an OTEL span (no-op without Langfuse).
+
     # plan failure → no error_handler → the run fails (no usable report, §9.1).
     plan_next = "awaiting_approval" if hitl_plan_approval else "recalling"
     builder.add_node(
-        "plan", make_plan_node(llm, next_status=plan_next), retry_policy=net_retry
+        "plan",
+        _instrument("plan", make_plan_node(llm, next_status=plan_next)),
+        retry_policy=net_retry,
     )
     # HITL gate (slice 12): interrupt for human review/edit when enabled, else a
     # transparent pass-through. Always present so the topology is resume-stable.
     builder.add_node(
-        "await_approval", make_await_approval_node(enabled=hitl_plan_approval)
+        "await_approval",
+        _instrument("await_approval", make_await_approval_node(enabled=hitl_plan_approval)),
     )
     builder.add_node(
         "recall",
-        make_recall_node(
-            db,
-            embeddings,
-            ttl_durable_seconds=memory_ttl_durable_seconds,
-            ttl_volatile_seconds=memory_ttl_volatile_seconds,
-            match_max_distance=memory_match_max_distance,
-            revalidator=memory_revalidator,
+        _instrument(
+            "recall",
+            make_recall_node(
+                db,
+                embeddings,
+                ttl_durable_seconds=memory_ttl_durable_seconds,
+                ttl_volatile_seconds=memory_ttl_volatile_seconds,
+                match_max_distance=memory_match_max_distance,
+                revalidator=memory_revalidator,
+            ),
         ),
     )
     # gather fans out (slice 13): the dispatcher (no network) Sends a parallel
     # gather_one worker per question; the worker is the network-bound, retried,
     # degradable unit. A failed worker routes to extract (its normal successor) so
     # the other questions' evidence still flows — that question becomes an Unknown.
-    builder.add_node("gather", make_gather_node(max_extra_passes=max_extra_passes))
+    builder.add_node(
+        "gather", _instrument("gather", make_gather_node(max_extra_passes=max_extra_passes))
+    )
     # gather_one self-handles retry + degrade internally (a node-level error_handler
     # does not apply to Send-invoked workers), so no retry_policy/error_handler here.
     builder.add_node(
         "gather_one",
-        make_gather_one_node(search, retry_max_attempts=retry_max_attempts),
+        _instrument(
+            "gather_one",
+            make_gather_one_node(search, retry_max_attempts=retry_max_attempts),
+        ),
     )
     # extract/analyze failures (after retries) degrade to an honest partial report
     # via the error_handler instead of aborting (§6.1).
     builder.add_node(
         "extract",
-        make_extract_node(llm, max_extra_passes=max_extra_passes),
+        _instrument("extract", make_extract_node(llm, max_extra_passes=max_extra_passes)),
         retry_policy=net_retry,
         error_handler=make_error_handler("extract"),
     )
     builder.add_node(
         "analyze",
-        make_analyze_node(llm, max_extra_passes=max_extra_passes),
+        _instrument("analyze", make_analyze_node(llm, max_extra_passes=max_extra_passes)),
         retry_policy=net_retry,
         error_handler=make_error_handler("analyze"),
     )
     builder.add_node(
         "quality_gate",
-        make_quality_node(
-            llm, quality_threshold=quality_threshold, max_extra_passes=max_extra_passes
+        _instrument(
+            "quality_gate",
+            make_quality_node(
+                llm,
+                quality_threshold=quality_threshold,
+                max_extra_passes=max_extra_passes,
+            ),
         ),
     )
-    builder.add_node("report", report_node)
+    builder.add_node("report", _instrument("report", report_node))
     builder.add_node(
         "persist",
-        make_persist_node(db, model_meta=model_meta, embeddings=embeddings),
+        _instrument(
+            "persist",
+            make_persist_node(db, model_meta=model_meta, embeddings=embeddings),
+        ),
     )
 
     builder.add_edge(START, "plan")

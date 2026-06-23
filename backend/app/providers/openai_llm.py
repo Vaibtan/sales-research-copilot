@@ -129,13 +129,24 @@ class OpenAILLMClient:
 
         usage = getattr(response, "usage", None)
         if usage is not None:
-            # Cost/latency observability hook (slice 14 ties this to OTEL spans).
+            input_tokens = getattr(usage, "input_tokens", None)
+            output_tokens = getattr(usage, "output_tokens", None)
+            # Cost/latency observability (slice 14): log + annotate the active span.
             log.info(
                 "llm.usage",
                 task=task.value,
                 model=model_id,
-                input_tokens=getattr(usage, "input_tokens", None),
-                output_tokens=getattr(usage, "output_tokens", None),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            from app.observability.tracing import set_current_attributes
+
+            set_current_attributes(
+                **{
+                    "llm.model": model_id,
+                    "llm.input_tokens": input_tokens,
+                    "llm.output_tokens": output_tokens,
+                }
             )
 
         parsed = response.output_parsed

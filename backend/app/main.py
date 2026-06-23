@@ -21,6 +21,7 @@ from app.db.migrator import run_migrations
 from app.graph import GraphRunner, build_chat_graph, build_checkpointer, build_graph
 from app.infra import Cache, Database, ProgressBus
 from app.logging import configure_logging, get_logger
+from app.observability import configure_tracing
 from app.providers import build_providers
 from app.services import ChatService, SessionService
 from app.settings import Settings, get_settings
@@ -31,6 +32,8 @@ log = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
+
+    configure_tracing(settings)  # OTEL → Langfuse when enabled; no-op otherwise
 
     db = Database(
         settings.database_url,

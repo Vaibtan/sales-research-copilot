@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     ledger_poll_seconds: float = 0.25  # waiter re-check cadence (single-flight)
     ledger_wait_timeout_seconds: float = 120.0  # max single-flight wait
 
+    # --- Observability (PRD §0, §14; Langfuse OTEL, off by default) -------
+    otel_enabled: bool = False
+    langfuse_host: str | None = None  # e.g. http://localhost:3000
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+
     # --- Providers (real backends wired in slice 7) ----------------------
     openai_api_key: str | None = None
     tavily_api_key: str | None = None
