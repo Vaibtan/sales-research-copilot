@@ -21,6 +21,7 @@ from app.logging import get_logger
 log = get_logger(__name__)
 
 _HISTORY_TURNS = 8
+_NOT_IN_REPORT = "That information is not in the report."
 
 
 class ChatService:
@@ -64,11 +65,17 @@ class ChatService:
         citations = await repository.resolve_citations(
             self._db, session_id=session_id, source_ids=answer.source_ids
         )
+        # Server-side enforcement of the must-cite-or-decline contract (§8): if the
+        # answer resolved to no in-scope citation, we must not present its prose as
+        # grounded — substitute the canonical decline. This is defense-in-depth
+        # behind the prompt (an LLM that ignores it, or cites since-dropped sources,
+        # would otherwise stream an ungrounded answer as if grounded).
+        content = answer.answer if citations else _NOT_IN_REPORT
         assistant = await repository.insert_message(
             self._db,
             session_id=session_id,
             role="assistant",
-            content=answer.answer,
+            content=content,
             citations=citations,
             report_version=report_version,
         )
@@ -79,7 +86,7 @@ class ChatService:
             grounded=bool(citations),
         )
 
-        for token in _tokenize(answer.answer):
+        for token in _tokenize(content):
             yield _sse("token", json.dumps({"text": token}))
         yield _sse(
             "done",

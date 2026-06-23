@@ -79,6 +79,7 @@ class MemoryMatch:
     fact: str
     fact_norm: str
     fetched_at: datetime
+    last_validated_at: datetime
     distance: float
 
 
@@ -554,7 +555,7 @@ async def match_memory(
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT id, section, freshness_class, url, title, snippet,"
-                " content_hash, fact, fact_norm, fetched_at,"
+                " content_hash, fact, fact_norm, fetched_at, last_validated_at,"
                 " (embedding <=> %s::vector) AS distance"
                 " FROM research_memory"
                 " WHERE company_key = %s AND section = %s AND id <> ALL(%s::text[])"
@@ -575,6 +576,7 @@ async def match_memory(
         fact=row["fact"],
         fact_norm=row["fact_norm"],
         fetched_at=row["fetched_at"],
+        last_validated_at=row["last_validated_at"],
         distance=row["distance"],
     )
 

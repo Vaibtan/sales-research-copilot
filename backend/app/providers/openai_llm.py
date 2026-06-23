@@ -169,4 +169,12 @@ async def verify_models(client: "AsyncOpenAI", model_ids: set[str]) -> None:
             raise ModelVerificationError(
                 f"configured model id {model_id!r} is not available on the API"
             ) from exc
+        except Exception as exc:  # noqa: BLE001 — surface a clear, attributable error
+            # A transient/auth error at the verify gate would otherwise propagate an
+            # opaque traceback out of app startup; wrap it so the failure is clear
+            # (which model, that it was verification-time) for the operator.
+            raise ModelVerificationError(
+                f"could not verify model id {model_id!r} at boot: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     log.info("openai.models_verified", models=sorted(model_ids))

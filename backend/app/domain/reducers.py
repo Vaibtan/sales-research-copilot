@@ -67,8 +67,12 @@ def supersede_by_question(
     For every question present in ``right``, drop existing facts of that question
     from a *strictly older* attempt, then merge the incoming facts (dedup by
     fact id). Same-attempt facts accumulate (multiple sources per question); a
-    higher attempt (a loop-back re-research) wipes the question's older set so no
-    stale predecessor survives.
+    higher attempt (a loop-back re-research) wipes the question's older set.
+
+    Note: supersession is driven by questions that actually produce new facts. If a
+    re-research yields *nothing* for a weak question (extract returns no claims),
+    that question is absent from ``right`` and its prior facts are kept — the
+    best-available grounded evidence — rather than dropping it to an empty section.
     """
     incoming = right or []
     if not incoming:

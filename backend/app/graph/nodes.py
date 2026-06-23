@@ -200,7 +200,10 @@ def make_recall_node(
                 if match.freshness_class == FreshnessClass.VOLATILE.value
                 else ttl_durable_seconds
             )
-            if (now - match.fetched_at).total_seconds() >= ttl:
+            # Age against `last_validated_at` (the real proof-of-freshness), which a
+            # successful revalidation advances — using the frozen `fetched_at` would
+            # re-fetch an unchanged durable fact on *every* run forever (Codex review).
+            if (now - match.last_validated_at).total_seconds() >= ttl:
                 # Stale → re-fetch & revalidate by content_hash (§7.1 step 3).
                 if revalidator is None:
                     continue  # can't revalidate (mock) → let gather re-derive
@@ -302,6 +305,21 @@ def make_gather_one_node(search: SearchProvider, *, retry_max_attempts: int = 3)
     ``degraded=True``) rather than aborting the whole fan-out — the other questions'
     evidence still flows, and the failed one becomes an honest Unknown (§6.1)."""
 
+    def _degrade(question_id: str, exc: Exception) -> dict:
+        log.warning(
+            "graph.gather_one_degraded",
+            question_id=question_id,
+            error_type=type(exc).__name__,
+        )
+        return {
+            "degraded": True,
+            "errors": [
+                NodeErrorRecord(
+                    node="gather", error_type=type(exc).__name__, message=str(exc)[:500]
+                )
+            ],
+        }
+
     async def gather_one(payload: dict) -> dict:
         question = payload["question"]
         session_id = payload["session_id"]
@@ -318,42 +336,34 @@ def make_gather_one_node(search: SearchProvider, *, retry_max_attempts: int = 3)
                 if is_transient(exc) and tries < retry_max_attempts:
                     await asyncio.sleep(0.2 * tries)
                     continue
-                log.warning(
-                    "graph.gather_one_degraded",
-                    session_id=session_id,
-                    question_id=question.id,
-                    error_type=type(exc).__name__,
-                )
-                return {
-                    "degraded": True,
-                    "errors": [
-                        NodeErrorRecord(
-                            node="gather",
-                            error_type=type(exc).__name__,
-                            message=str(exc)[:500],
-                        )
-                    ],
-                }
+                return _degrade(question.id, exc)
 
-        sources: list[Source] = []
-        assignments: list[QuestionSource] = []
-        for hit in hits:
-            sid = source_id(session_id, hit.url)
-            sources.append(
-                Source(
-                    id=sid,
-                    url=normalize_url(hit.url),
-                    title=hit.title,
-                    snippet=hit.snippet,
-                    content_hash=content_hash(hit.content or hit.snippet),
-                    fetched_at=_now(),
+        # Construction also runs under the degrade guard: a real provider can return
+        # a malformed url that normalize_url rejects — that must degrade *this*
+        # question, not propagate out of the Send worker and abort the whole fan-out.
+        try:
+            sources: list[Source] = []
+            assignments: list[QuestionSource] = []
+            for hit in hits:
+                sid = source_id(session_id, hit.url)
+                sources.append(
+                    Source(
+                        id=sid,
+                        url=normalize_url(hit.url),
+                        title=hit.title,
+                        snippet=hit.snippet,
+                        content_hash=content_hash(hit.content or hit.snippet),
+                        fetched_at=_now(),
+                    )
                 )
-            )
-            # Stamp the attempt so a loop-back supersedes this question's older links
-            # (Codex F1) — extract then re-runs only over the fresh hits.
-            assignments.append(
-                QuestionSource(question_id=question.id, source_id=sid, attempt=attempt)
-            )
+                # Stamp the attempt so a loop-back supersedes this question's older
+                # links (Codex F1) — extract then re-runs only over the fresh hits.
+                assignments.append(
+                    QuestionSource(question_id=question.id, source_id=sid, attempt=attempt)
+                )
+        except Exception as exc:  # noqa: BLE001 — malformed hit → degrade this question
+            return _degrade(question.id, exc)
+
         # Workers run concurrently → only write the reducer-merged channels
         # (sources/assignments). `status` is a single-value channel already set to
         # "gathering" by recall; writing it here would collide across the fan-out.
@@ -373,6 +383,13 @@ def make_extract_node(llm: LLMClient, *, max_extra_passes: int):
         for assignment in state["assignments"]:
             if weak and assignment.question_id not in weak:
                 continue  # loop-back: only re-extract weak questions (no re-pay)
+            # On a loop-back, skip a weak question's *stale* (older-attempt) links —
+            # they survive in the channel when a re-gather produced no fresh source
+            # for that question. Re-extracting them would re-pay the LLM over evidence
+            # the quality gate already judged weak; the prior facts remain the
+            # best-available (Codex review).
+            if weak and assignment.attempt < attempt:
+                continue
             source = sources_by_id.get(assignment.source_id)
             question = questions_by_id.get(assignment.question_id)
             if source is None or question is None:

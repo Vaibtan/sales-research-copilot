@@ -196,9 +196,13 @@ class CallLedger:
     async def _heartbeat(self, key: LedgerKey, owner: str) -> None:
         """Periodically extend our lease while the provider call is in flight, so a
         legitimately slow call is not taken over as if the owner had crashed.
+
+        A transient DB/pool error on one beat must NOT kill heartbeating for the
+        rest of the call (that would silently let the lease expire and trigger a
+        needless takeover) — so non-cancel errors are logged and the loop continues.
         Stops contributing once we no longer own the row (taken over)."""
-        try:
-            while True:
+        while True:
+            try:
                 await asyncio.sleep(self._cfg.heartbeat_seconds)
                 async with self._db.pool.connection() as conn:
                     await conn.execute(
@@ -214,8 +218,10 @@ class CallLedger:
                         ),
                     )
                     await conn.commit()
-        except asyncio.CancelledError:
-            pass
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 — one bad beat must not stop heartbeating
+                log.warning("ledger.heartbeat_failed", node=key.node, exc_info=True)
 
     async def _produce_and_commit(self, key: LedgerKey, owner: str, produce) -> dict:
         """Run the provider call (heartbeating the lease) then commit the result.
@@ -228,6 +234,12 @@ class CallLedger:
             response = await produce(key.idempotency_key)
         except Exception:
             await self._fail(key, owner)
+            # If we were taken over mid-flight and the new owner already committed,
+            # the call logically succeeded — return its result instead of surfacing
+            # a spurious failure to a still-alive caller (mirror the commit path).
+            row = await self._read(key)
+            if row is not None and row["status"] == "done":
+                return row["response_jsonb"]
             raise
         finally:
             hb.cancel()

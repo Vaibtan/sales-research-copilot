@@ -147,6 +147,40 @@ async def test_chat_requires_a_ready_report(settings):
             assert missing.status_code == 404
 
 
+async def test_ungrounded_answer_is_overridden_with_decline(settings):
+    """Server-side must-cite-or-decline: even if the model returns confident prose
+    with source_ids that don't resolve, the streamed/persisted answer is the
+    canonical decline — not the ungrounded text."""
+    from app.domain.models import ChatAnswer
+    from app.services.chat import ChatService
+
+    app = _app()
+    async with app.router.lifespan_context(app):
+        async with await _client(app) as client:
+            sid = await _create_and_finish(client)
+
+            class _FakeGraph:
+                async def ainvoke(self, state):
+                    # Confident, but cites a source id that isn't in this session.
+                    return {"answer": ChatAnswer(answer="Acme definitely will IPO next week.", source_ids=["bogus-source-id"])}
+
+            svc = ChatService(app.state.db, _FakeGraph())
+            frames = [
+                f
+                async for f in svc.answer_stream(
+                    session_id=sid, report_version=1, message="Will they IPO?"
+                )
+            ]
+            answer = "".join(
+                d["text"]
+                for e, d in _parse_sse("".join(frames))
+                if e == "token"
+            )
+
+    assert "not in the report" in answer.lower()
+    assert "IPO" not in answer  # the ungrounded prose was not streamed
+
+
 async def test_citation_snapshot_survives_source_drop_and_marks_stale(settings):
     app = _app()
     async with app.router.lifespan_context(app):

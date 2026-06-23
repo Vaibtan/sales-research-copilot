@@ -48,11 +48,14 @@ async def _seed_memory(
     fnorm = normalize_claim(fact_text)
     async with db.pool.connection() as conn:
         await conn.execute(
+            # Seed last_validated_at = fetched_at: the fact was fetched (and last
+            # known fresh) at fetched_at and not re-validated since.
             "INSERT INTO research_memory (id, company_key, section, freshness_class,"
             " url, title, snippet, content_hash, fact, fact_norm, embedding,"
             " fetched_at, last_validated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-            " %s::vector,%s, now()) ON CONFLICT (company_key, content_hash, fact_norm)"
-            " DO UPDATE SET fetched_at = EXCLUDED.fetched_at",
+            " %s::vector,%s,%s) ON CONFLICT (company_key, content_hash, fact_norm)"
+            " DO UPDATE SET fetched_at = EXCLUDED.fetched_at,"
+            " last_validated_at = EXCLUDED.last_validated_at",
             (
                 memory_id(company_key, chash, fnorm),
                 company_key,
@@ -66,6 +69,7 @@ async def _seed_memory(
                 fnorm,
                 vec_lit,
                 fetched_at,
+                fetched_at,  # last_validated_at = fetched_at (not re-validated since)
             ),
         )
         await conn.commit()

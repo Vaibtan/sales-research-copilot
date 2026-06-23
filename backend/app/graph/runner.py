@@ -162,8 +162,17 @@ class GraphRunner:
                 # the old run's, so the upgrade could never shed the prior degraded
                 # state. Deleting the checkpoint makes it a truly clean run; the
                 # relational session/report rows are untouched.
-                with contextlib.suppress(Exception):
+                #
+                # This delete is a correctness *precondition*, not a best-effort side
+                # effect — if it fails we must NOT proceed against the stale
+                # checkpoint (that would silently produce a permanently-degraded
+                # "upgrade"). Let the error surface (the taxonomy maps a transient DB
+                # error → 503; `finally` releases the reservation).
+                try:
                     await self._graph.checkpointer.adelete_thread(session_id)
+                except Exception:
+                    log.exception("graph.resume_delete_failed", session_id=session_id)
+                    raise
                 graph_input = fresh_state
                 phase = "planning"
             else:

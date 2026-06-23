@@ -40,6 +40,7 @@ class _Out(BaseModel):
         "http://169.254.169.254/latest/meta-data/",  # cloud metadata
         "http://10.0.0.5/internal",
         "http://192.168.1.1/",
+        "http://100.64.0.1/cgnat",  # RFC 6598 shared/CGNAT space
         "ftp://example.com/file",  # non-http scheme
         "file:///etc/passwd",
         "http:///nohost",
@@ -48,6 +49,53 @@ class _Out(BaseModel):
 def test_ssrf_guard_blocks_unsafe_urls(url: str) -> None:
     with pytest.raises(SsrfError):
         assert_public_url(url)
+
+
+async def test_fetch_text_blocks_redirect_to_internal_address() -> None:
+    """SSRF guard must re-validate every redirect hop — a public url that 302s to a
+    private/metadata address is blocked (auto-redirects would bypass the guard)."""
+    from app.providers.fetch import fetch_text
+
+    class _Resp:
+        def __init__(self, redirect_to=None):
+            self.is_redirect = redirect_to is not None
+            self.headers = {"location": redirect_to} if redirect_to else {}
+            self.url = httpx.URL("https://8.8.8.8/start")
+            self.encoding = "utf-8"
+
+        def raise_for_status(self):
+            pass
+
+        async def aiter_bytes(self):
+            yield b"ok"
+
+    class _Stream:
+        def __init__(self, resp):
+            self._resp = resp
+
+        async def __aenter__(self):
+            return self._resp
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def __init__(self):
+            self.urls = []
+
+        def stream(self, method, url):
+            self.urls.append(url)
+            # First hop 302s to the cloud-metadata address.
+            return _Stream(_Resp(redirect_to="http://169.254.169.254/latest/meta-data/"))
+
+        async def aclose(self):
+            pass
+
+    client = _Client()
+    with pytest.raises(SsrfError):
+        await fetch_text("https://8.8.8.8/start", client=client)
+    # The internal redirect target was never actually fetched (blocked before connect).
+    assert all("169.254" not in str(u) for u in client.urls)
 
 
 def test_ssrf_guard_allows_public_ip_literal() -> None:
