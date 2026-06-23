@@ -65,6 +65,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ledger=ledger,
         model_meta=providers.model_meta,
         retry_max_attempts=settings.retry_max_attempts,
+        embeddings=providers.embeddings,
     )
     progress_bus = ProgressBus(cache)
     runner = GraphRunner(graph, db, progress_bus)

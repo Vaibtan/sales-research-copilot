@@ -15,7 +15,8 @@ from typing import Literal
 from langgraph.errors import NodeError
 from langgraph.types import Command
 
-from app.db.repository import persist_results
+from app.db.repository import ChunkRow, persist_results
+from app.domain.chunking import report_chunk_specs, source_chunk_specs
 from app.domain.identity import (
     content_hash,
     fact_id,
@@ -44,6 +45,7 @@ from app.domain.state import ResearchState
 from app.infra.database import Database
 from app.logging import get_logger
 from app.providers.base import CallSite, LLMClient, LLMTask, SearchProvider
+from app.providers.embeddings import EmbeddingClient
 from app.providers.contexts import (
     AnalyzeContext,
     ExtractContext,
@@ -327,33 +329,71 @@ def make_error_handler(node: str):
     return handle
 
 
-def make_persist_node(db: Database, *, model_meta: dict | None = None):
+def make_persist_node(
+    db: Database,
+    *,
+    model_meta: dict | None = None,
+    embeddings: EmbeddingClient | None = None,
+):
     meta = model_meta or {"providers": "mock"}
 
     async def persist(state: ResearchState) -> dict:
         report = state["report"]
         assert report is not None
+        session_id = state["session_id"]
         degraded = state["degraded"]
         status = "degraded" if degraded else "done"
+
+        # Slice 9: chunk + embed the served report and sources, then write the
+        # vectors *inside* the persist transaction. Embeddings are generated through
+        # the ledger (idempotent on resume); empty lists still prune stale chunks.
+        report_chunks: list[ChunkRow] | None = None
+        source_chunks: list[ChunkRow] | None = None
+        if embeddings is not None:
+            specs = report_chunk_specs(session_id, report) + source_chunk_specs(
+                report.sources
+            )
+            report_chunks, source_chunks = [], []
+            if specs:
+                vectors = await embeddings.embed(
+                    [s.text for s in specs],
+                    call=CallSite(session_id, "embed", 1),
+                )
+                for spec, vector in zip(specs, vectors):
+                    row = ChunkRow(
+                        id=spec.id,
+                        session_id=session_id,
+                        owner=spec.owner,
+                        chunk_ix=spec.chunk_ix,
+                        text=spec.text,
+                        embedding=vector,
+                    )
+                    target = report_chunks if spec.kind == "report" else source_chunks
+                    target.append(row)
+
         # The report's Sources are the cited set (report_node derived them); persist
         # that set so the full-materialization replacement prunes any source the
         # loop-back left uncited (Codex F1).
         await persist_results(
             db,
-            session_id=state["session_id"],
+            session_id=session_id,
             sources=report.sources,
             facts=state["facts"],
             report=report,
             status=status,
             degraded=degraded,
             model_meta=meta,
+            report_chunks=report_chunks,
+            source_chunks=source_chunks,
         )
         log.info(
             "graph.persisted",
-            session_id=state["session_id"],
+            session_id=session_id,
             status=status,
             sources=len(report.sources),
             facts=len(state["facts"]),
+            report_chunks=len(report_chunks) if report_chunks is not None else 0,
+            source_chunks=len(source_chunks) if source_chunks is not None else 0,
         )
         return {"status": status}
 

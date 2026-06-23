@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from app.db.ledger import CallLedger, LedgerKey
 from app.domain.identity import content_hash
 from app.providers.base import CallSite, LLMClient, LLMTask, T
+from app.providers.embeddings import EmbeddingClient
 
 
 def _input_hash(
@@ -78,3 +79,36 @@ class LedgerLLMClient:
 
         cached = await self._ledger.run(key, produce)
         return output_type.model_validate(cached)
+
+
+class LedgerEmbeddingClient:
+    """An :class:`EmbeddingClient` that de-duplicates embedding calls through the
+    durable ledger (slice 9) — so a resume re-embeds nothing already committed."""
+
+    def __init__(self, inner: EmbeddingClient, ledger: CallLedger) -> None:
+        self._inner = inner
+        self._ledger = ledger
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        call: CallSite | None = None,
+        idempotency_key: str | None = None,
+    ) -> list[list[float]]:
+        if call is None or not texts:
+            return await self._inner.embed(texts)
+
+        key = LedgerKey(
+            session_id=call.session_id,
+            node=call.node,
+            attempt=call.attempt,
+            input_hash=content_hash("\x1f".join(texts)),
+        )
+
+        async def produce(idem: str) -> dict:
+            vectors = await self._inner.embed(texts, idempotency_key=idem)
+            return {"vectors": vectors}
+
+        cached = await self._ledger.run(key, produce)
+        return cached["vectors"]

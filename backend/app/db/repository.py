@@ -22,6 +22,25 @@ from app.domain.models import Fact, ResearchReport, Source
 from app.infra.database import Database
 
 
+@dataclass(slots=True)
+class ChunkRow:
+    """An embedded chunk to persist. ``owner`` is the section value (report chunk)
+    or the ``source_id`` (source chunk); ``embedding`` is the raw 1536-float vector."""
+
+    id: str
+    session_id: str
+    owner: str
+    chunk_ix: int
+    text: str
+    embedding: list[float]
+
+
+def _vec_literal(embedding: list[float]) -> str:
+    """pgvector text input format ``[f1,f2,…]`` — cast with ``%s::vector`` so no
+    extra driver adapter is needed."""
+    return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+
+
 def _materialization_hash(report: ResearchReport) -> str:
     """Fingerprint the *served* report (sections, unknowns, sources, quality
     score) so an identical re-persist is detectable. Excludes ``model_meta`` and
@@ -107,15 +126,21 @@ async def persist_results(
     status: str,
     degraded: bool,
     model_meta: dict | None = None,
+    report_chunks: list[ChunkRow] | None = None,
+    source_chunks: list[ChunkRow] | None = None,
 ) -> None:
     """Write the full session materialization in one transaction.
 
     Beyond upserting on deterministic ids, this **replaces** the whole session
     set so a regenerate/resume is *convergent*, not merely duplicate-free: any
-    ``sources`` / ``facts`` absent from the new output are deleted (a dropped
-    source cascades to its ``facts`` and ``source_chunks``; a re-worded claim's
-    stale predecessor is removed even though its source survives). ``report_chunks``
-    replacement lands with the vector layer in slice 9.
+    ``sources`` / ``facts`` / chunks absent from the new output are deleted (a
+    dropped source cascades to its ``facts`` and ``source_chunks``; a re-worded
+    claim's stale predecessor is removed even though its source survives; a
+    shrinking regenerate leaves no orphan ``report_chunks``/``source_chunks``).
+
+    The pgvector chunk writes (slice 9) commit **with** the relational rows — pass
+    ``report_chunks``/``source_chunks`` (possibly empty to clear them); ``None``
+    leaves the chunk tables untouched (direct unit-test calls that don't chunk).
     """
     source_ids = [s.id for s in sources]
     fact_ids = [f.id for f in facts]
@@ -169,6 +194,23 @@ async def persist_results(
                 (session_id, fact_ids),
             )
 
+            # Chunk replacement (slice 9): same prune-then-upsert as the relational
+            # rows, in the same transaction. Dropped sources already cascade their
+            # source_chunks; this also removes stale chunks on *surviving* owners
+            # after a shrink. An empty list clears the table for this session.
+            if report_chunks is not None:
+                await conn.execute(
+                    "DELETE FROM report_chunks WHERE session_id = %s"
+                    " AND id <> ALL(%s::text[])",
+                    (session_id, [c.id for c in report_chunks]),
+                )
+            if source_chunks is not None:
+                await conn.execute(
+                    "DELETE FROM source_chunks WHERE session_id = %s"
+                    " AND id <> ALL(%s::text[])",
+                    (session_id, [c.id for c in source_chunks]),
+                )
+
             async with conn.cursor() as cur:
                 if sources:
                     await cur.executemany(
@@ -198,6 +240,32 @@ async def persist_results(
                              f.freshness_class.value, f.claim, f.claim_norm,
                              f.source_id, f.confidence, f.attempt)
                             for f in facts
+                        ],
+                    )
+                if report_chunks:
+                    await cur.executemany(
+                        "INSERT INTO report_chunks (id, session_id, section,"
+                        " chunk_ix, text, embedding) VALUES (%s, %s, %s, %s, %s, %s::vector)"
+                        " ON CONFLICT (id) DO UPDATE SET section = EXCLUDED.section,"
+                        " chunk_ix = EXCLUDED.chunk_ix, text = EXCLUDED.text,"
+                        " embedding = EXCLUDED.embedding",
+                        [
+                            (c.id, session_id, c.owner, c.chunk_ix, c.text,
+                             _vec_literal(c.embedding))
+                            for c in report_chunks
+                        ],
+                    )
+                if source_chunks:
+                    await cur.executemany(
+                        "INSERT INTO source_chunks (id, session_id, source_id,"
+                        " chunk_ix, text, embedding) VALUES (%s, %s, %s, %s, %s, %s::vector)"
+                        " ON CONFLICT (id) DO UPDATE SET source_id = EXCLUDED.source_id,"
+                        " chunk_ix = EXCLUDED.chunk_ix, text = EXCLUDED.text,"
+                        " embedding = EXCLUDED.embedding",
+                        [
+                            (c.id, session_id, c.owner, c.chunk_ix, c.text,
+                             _vec_literal(c.embedding))
+                            for c in source_chunks
                         ],
                     )
 

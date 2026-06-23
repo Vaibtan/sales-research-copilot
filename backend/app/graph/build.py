@@ -32,8 +32,9 @@ from app.graph.nodes import (
 )
 from app.infra.database import Database
 from app.providers.base import LLMClient, SearchProvider
+from app.providers.embeddings import EmbeddingClient
 from app.providers.errors import is_transient
-from app.providers.ledger import LedgerLLMClient
+from app.providers.ledger import LedgerEmbeddingClient, LedgerLLMClient
 
 
 def build_graph(
@@ -47,12 +48,15 @@ def build_graph(
     ledger: CallLedger | None = None,
     model_meta: dict | None = None,
     retry_max_attempts: int = 3,
+    embeddings: EmbeddingClient | None = None,
 ) -> CompiledStateGraph:
-    # Route every LLM call through the durable ledger (§6.5) so a mid-node kill
-    # re-pays nothing on resume. When no ledger is supplied (some unit tests) the
-    # nodes call the provider directly.
+    # Route every LLM / embedding call through the durable ledger (§6.5) so a
+    # mid-node kill re-pays nothing on resume. When no ledger is supplied (some unit
+    # tests) the nodes call the provider directly.
     if ledger is not None:
         llm = LedgerLLMClient(llm, ledger)
+        if embeddings is not None:
+            embeddings = LedgerEmbeddingClient(embeddings, ledger)
 
     # Network-bound nodes retry transient failures (PRD §7, §11). The predicate
     # only matches transient provider/network errors; deterministic mocks never
@@ -92,7 +96,10 @@ def build_graph(
         ),
     )
     builder.add_node("report", report_node)
-    builder.add_node("persist", make_persist_node(db, model_meta=model_meta))
+    builder.add_node(
+        "persist",
+        make_persist_node(db, model_meta=model_meta, embeddings=embeddings),
+    )
 
     builder.add_edge(START, "plan")
     builder.add_edge("plan", "recall")

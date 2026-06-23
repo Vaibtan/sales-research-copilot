@@ -334,11 +334,13 @@ PRD refs: §7 (layer 3 semantic), §10 (`report_chunks`, `source_chunks`), §11 
 
 ### Acceptance criteria
 
-- [ ] `report_chunks` and `source_chunks` tables exist with `vector(1536)` columns and the §10 unique constraints.
-- [ ] Embedding generation goes through the slice-6 ledger (idempotent, not re-paid on resume).
-- [ ] Chunking + embedding writes happen **inside the persist transaction** — a failure rolls back relational *and* vector writes together.
-- [ ] After a successful run, chunks exist with embeddings for the report and each source.
-- [ ] The shrink/replace rules from slice 5 hold for chunks (no orphan `report_chunks`/`source_chunks`).
+- [x] `report_chunks` and `source_chunks` tables exist with `vector(1536)` columns and the §10 unique constraints. *(migration `0004_chunks.sql`; HNSW cosine indexes; FK cascades to sessions/sources.)*
+- [x] Embedding generation goes through the slice-6 ledger (idempotent, not re-paid on resume). *(`LedgerEmbeddingClient` wraps the embedding client in `build_graph`; persist embeds via `CallSite(session_id,"embed",1)` → `llm_calls` rows. `test_run_persists_chunks_with_embeddings_via_ledger` asserts a `done` `node='embed'` row.)*
+- [x] Chunking + embedding writes happen **inside the persist transaction** — a failure rolls back relational *and* vector writes together. *(`persist_results` writes chunk rows in the same `conn.transaction()` as sessions/reports/sources/facts; embeddings are generated before the txn (ledger-cached) and the vectors written within it.)*
+- [x] After a successful run, chunks exist with embeddings for the report and each source. *(`vector_dims(embedding) == 1536` for report chunks; one+ `source_chunks` per served source.)*
+- [x] The shrink/replace rules from slice 5 hold for chunks (no orphan `report_chunks`/`source_chunks`). *(prune-then-upsert by deterministic id extends to both chunk tables; a dropped source cascades its `source_chunks`. `test_shrinking_regenerate_leaves_no_orphan_chunks`, `test_dropping_source_cascades_to_its_chunks`.)*
+
+> **Notes:** vectors are stored via pgvector's text input (`%s::vector`) — no extra driver adapter/dep. Embeddings stored in the ledger as JSONB (size tradeoff accepted for MVP). Resolves the slice-5 chunk carry-forward (a). Backend suite **79 pass** (prior 72 + 7).
 
 ### Blocked by
 

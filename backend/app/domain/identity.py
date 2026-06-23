@@ -67,5 +67,13 @@ def report_id(session_id: str) -> str:
     return _digest(session_id)
 
 
+def report_chunk_id(session_id: str, section: str, chunk_ix: int) -> str:
+    return _digest(session_id, "report", section, str(chunk_ix))
+
+
+def source_chunk_id(source_id_: str, chunk_ix: int) -> str:
+    return _digest("source", source_id_, str(chunk_ix))
+
+
 def content_hash(text: str) -> str:
     return _digest(text)
