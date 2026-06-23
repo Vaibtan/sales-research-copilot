@@ -57,6 +57,7 @@ class ResearchState(TypedDict):
 
     retries_left: int
     weak_questions: list[str]
+    answered_questions: list[str]  # question_ids satisfied by recall (gather skips)
     reused_from_memory: bool
     degraded: bool
     status: Status

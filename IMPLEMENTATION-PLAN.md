@@ -400,13 +400,15 @@ schema), §16 (`company_key` = eTLD+1 fallback name; TTL 14d durable / 0–1d vo
 
 ### Acceptance criteria
 
-- [ ] `research_memory` is self-contained per §10 (provenance + `content_hash` + `fetched_at` + `section` + `freshness_class`; unique on `(company_key, content_hash, fact_norm)`); **no** `source_id`/`question_id`.
-- [ ] `company_key` = registrable domain (eTLD+1) of `website`, falling back to normalized company name.
-- [ ] Fresh reuse (`now - fetched_at < TTL`) **remaps** memory into the session as a new `sources` row (new session-scoped `source_id`) + a fact bound to the matched **approved** `question_id`; memory facts matching no approved question are dropped.
-- [ ] Stale reuse re-fetches the url: unchanged `content_hash` → refresh `last_validated_at` & reuse; changed → discard the stale fact and let `gather` re-derive.
-- [ ] **Invariant test:** every claim in the report cites a `sources` row that exists *in this session* (recall never makes a report cite another session's row).
-- [ ] `freshness_class` is stored (not inferred at read time); **acceptance test asserts the split** — volatile facts (Business Signals / Risks / news) are re-fetched while durable facts (Overview / Products) warm-start.
-- [ ] `persist` upserts `research_memory` so a second run on the same company warm-starts.
+- [x] `research_memory` is self-contained per §10 (provenance + `content_hash` + `fetched_at` + `section` + `freshness_class`; unique on `(company_key, content_hash, fact_norm)`); **no** `source_id`/`question_id`. *(migration `0006_research_memory.sql`; HNSW cosine index; `id = digest(company_key, content_hash, fact_norm)`.)*
+- [x] `company_key` = registrable domain (eTLD+1) of `website`, falling back to normalized company name. *(unchanged from slice 2 — `domain/company.py`.)*
+- [x] Fresh reuse (`now - fetched_at < TTL`) **remaps** memory into the session as a new `sources` row (new session-scoped `source_id`) + a fact bound to the matched **approved** `question_id`; memory facts matching no approved question are dropped. *(`make_recall_node`: per approved question, `match_memory` (section-scoped + nearest embedding ≤ distance) → remap fresh; no match → drop. `test_fresh_memory_warm_starts_and_invariant_holds`.)*
+- [x] Stale reuse re-fetches the url: unchanged `content_hash` → refresh `last_validated_at` & reuse; changed → discard the stale fact and let `gather` re-derive. *(stale → `revalidator(url)` (real fetch path; `None` for mock) → `content_hash` match → `touch_memory_validated` + remap, else `continue` so `gather` re-derives.)*
+- [x] **Invariant test:** every claim in the report cites a `sources` row that exists *in this session* (recall never makes a report cite another session's row). *(remapped source id = `source_id(session_id, url)`; the invariant test asserts every report source id equals the session-scoped digest.)*
+- [x] `freshness_class` is stored (not inferred at read time); **acceptance test asserts the split** — volatile facts (Business Signals / Risks / news) are re-fetched while durable facts (Overview / Products) warm-start. *(`test_freshness_split_volatile_refetched_durable_warmstarted`: durable Overview (fresh) → memory url; volatile Business Signals (2d old, TTL 1d, no revalidator) → re-derived via gather url.)*
+- [x] `persist` upserts `research_memory` so a second run on the same company warm-starts. *(persist embeds each fact claim (ledgered) → `MemoryRow` upsert in the persist txn; `test_persist_upserts_memory_for_future_warmstart`: cold run → memory rows → second run `reused_from_memory=True`.)*
+
+> **Notes:** binding is **section-scoped semantic match** (nearest embedding *within the question's section*) — a refinement of §7.1 that prevents a Products fact from ever binding to the Risks question (which would fabricate a section that must stay an honest Unknown). `gather` skips recall-`answered_questions` on the first pass (§6.1). Test isolation: an autouse fixture truncates the cross-session `research_memory` per test (the long-lived-DB gotcha, now for the company-keyed table). Backend suite **87 pass** (prior 84 + 3).
 
 ### Blocked by
 

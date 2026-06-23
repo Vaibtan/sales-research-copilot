@@ -49,6 +49,10 @@ def build_graph(
     model_meta: dict | None = None,
     retry_max_attempts: int = 3,
     embeddings: EmbeddingClient | None = None,
+    memory_ttl_durable_seconds: float = 14 * 86400,
+    memory_ttl_volatile_seconds: float = 86400,
+    memory_match_max_distance: float = 0.85,
+    memory_revalidator=None,
 ) -> CompiledStateGraph:
     # Route every LLM / embedding call through the durable ledger (§6.5) so a
     # mid-node kill re-pays nothing on resume. When no ledger is supplied (some unit
@@ -68,7 +72,17 @@ def build_graph(
 
     # plan failure → no error_handler → the run fails (no usable report, §9.1).
     builder.add_node("plan", make_plan_node(llm), retry_policy=net_retry)
-    builder.add_node("recall", make_recall_node())
+    builder.add_node(
+        "recall",
+        make_recall_node(
+            db,
+            embeddings,
+            ttl_durable_seconds=memory_ttl_durable_seconds,
+            ttl_volatile_seconds=memory_ttl_volatile_seconds,
+            match_max_distance=memory_match_max_distance,
+            revalidator=memory_revalidator,
+        ),
+    )
     # gather/extract/analyze failures (after retries) degrade to an honest partial
     # report via the error_handler instead of aborting (§6.1).
     builder.add_node(
@@ -139,6 +153,7 @@ def build_initial_state(
         quality=None,
         retries_left=max_extra_passes,
         weak_questions=[],
+        answered_questions=[],
         reused_from_memory=False,
         degraded=False,
         status="planning",

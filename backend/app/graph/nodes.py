@@ -15,7 +15,13 @@ from typing import Literal
 from langgraph.errors import NodeError
 from langgraph.types import Command
 
-from app.db.repository import ChunkRow, persist_results
+from app.db.repository import (
+    ChunkRow,
+    MemoryRow,
+    match_memory,
+    persist_results,
+    touch_memory_validated,
+)
 from app.domain.chunking import report_chunk_specs, source_chunk_specs
 from app.domain.identity import (
     content_hash,
@@ -40,7 +46,7 @@ from app.domain.models import (
     ResearchReport,
     Source,
 )
-from app.domain.sections import CONTENT_SECTIONS, Section, freshness_for
+from app.domain.sections import CONTENT_SECTIONS, FreshnessClass, Section, freshness_for
 from app.domain.state import ResearchState
 from app.infra.database import Database
 from app.logging import get_logger
@@ -87,11 +93,110 @@ def make_plan_node(llm: LLMClient):
     return plan
 
 
-def make_recall_node():
+def make_recall_node(
+    db: Database,
+    embeddings: EmbeddingClient | None,
+    *,
+    ttl_durable_seconds: float,
+    ttl_volatile_seconds: float,
+    match_max_distance: float,
+    revalidator=None,
+):
+    """Cross-session memory recall (PRD §7.1). Positioned after `plan` so each
+    reused fact binds to an approved ``question_id``. For each approved question we
+    match the nearest memory fact for this ``company_key``; if it is fresh (age <
+    TTL by stored ``freshness_class``) we **remap** it into this session as a new
+    session-scoped source + a question-owned fact; if stale we re-fetch & revalidate
+    by ``content_hash`` (unchanged → reuse, changed/unfetchable → let `gather`
+    re-derive). The invariant: every remapped fact cites a *this-session* source."""
+
     async def recall(state: ResearchState) -> dict:
-        # No-op until slice 11. Positioned after `plan` so reused facts can later
-        # bind to an approved question_id.
-        return {"reused_from_memory": False, "status": "gathering"}
+        if embeddings is None:
+            return {"reused_from_memory": False, "status": "gathering"}
+        session_id = state["session_id"]
+        company_key = state["company_key"]
+        questions = state["plan"].questions  # type: ignore[union-attr]
+
+        q_vectors = await embeddings.embed(
+            [q.text for q in questions],
+            call=CallSite(session_id, "recall_embed", 1),
+        )
+
+        used: list[str] = []
+        sources: list[Source] = []
+        facts: list[Fact] = []
+        answered: list[str] = []
+        now = _now()
+
+        for question, qvec in zip(questions, q_vectors):
+            match = await match_memory(
+                db,
+                company_key=company_key,
+                section=question.section.value,
+                query_vector=qvec,
+                exclude_ids=used,
+                max_distance=match_max_distance,
+            )
+            if match is None:
+                continue  # no memory fact matches this approved question → drop
+            used.append(match.id)
+
+            ttl = (
+                ttl_volatile_seconds
+                if match.freshness_class == FreshnessClass.VOLATILE.value
+                else ttl_durable_seconds
+            )
+            if (now - match.fetched_at).total_seconds() >= ttl:
+                # Stale → re-fetch & revalidate by content_hash (§7.1 step 3).
+                if revalidator is None:
+                    continue  # can't revalidate (mock) → let gather re-derive
+                fresh_hash = await revalidator(match.url)
+                if fresh_hash != match.content_hash:
+                    continue  # changed/unfetchable → discard, gather re-derives
+                await touch_memory_validated(db, match.id)
+
+            # Remap into THIS session: a new session-scoped source + a fact owned by
+            # the matched approved question (so the report can only cite this row).
+            sid = source_id(session_id, match.url)
+            sources.append(
+                Source(
+                    id=sid,
+                    url=normalize_url(match.url),
+                    title=match.title,
+                    snippet=match.snippet,
+                    content_hash=match.content_hash,
+                    fetched_at=match.fetched_at,
+                )
+            )
+            facts.append(
+                Fact(
+                    id=fact_id(session_id, question.id, sid, match.fact_norm),
+                    session_id=session_id,
+                    question_id=question.id,
+                    section=question.section,
+                    freshness_class=FreshnessClass(match.freshness_class),
+                    claim=match.fact,
+                    claim_norm=match.fact_norm,
+                    source_id=sid,
+                    confidence=0.7,
+                    attempt=1,
+                )
+            )
+            answered.append(question.id)
+
+        log.info(
+            "graph.recall",
+            session_id=session_id,
+            company_key=company_key,
+            reused=len(answered),
+        )
+        return {
+            "sources": sources,
+            "facts": facts,
+            "answered_questions": answered,
+            "reused_from_memory": bool(answered),
+            "status": "gathering",
+        }
 
     return recall
 
@@ -102,8 +207,13 @@ def make_gather_node(search: SearchProvider, *, max_extra_passes: int):
         assert plan is not None
         attempt = max_extra_passes - state["retries_left"] + 1
         weak = set(state.get("weak_questions") or [])
-        # Slice 4 loop-back: re-research only weak questions; else all.
-        questions = [q for q in plan.questions if not weak or q.id in weak]
+        answered = set(state.get("answered_questions") or [])
+        # Loop-back re-researches only weak questions; the first pass researches the
+        # questions NOT already answered by recall (§6.1).
+        if weak:
+            questions = [q for q in plan.questions if q.id in weak]
+        else:
+            questions = [q for q in plan.questions if q.id not in answered]
 
         sources: list[Source] = []
         assignments: list[QuestionSource] = []
@@ -349,6 +459,7 @@ def make_persist_node(
         # the ledger (idempotent on resume); empty lists still prune stale chunks.
         report_chunks: list[ChunkRow] | None = None
         source_chunks: list[ChunkRow] | None = None
+        memory_rows: list[MemoryRow] | None = None
         if embeddings is not None:
             specs = report_chunk_specs(session_id, report) + source_chunk_specs(
                 report.sources
@@ -371,6 +482,36 @@ def make_persist_node(
                     target = report_chunks if spec.kind == "report" else source_chunks
                     target.append(row)
 
+            # Slice 11: upsert each served fact into cross-session memory (self-
+            # contained) for future warm-starts, embedding the claim for recall match.
+            memory_rows = []
+            facts = state["facts"]
+            if facts:
+                sources_by_id = {s.id: s for s in report.sources}
+                fact_vectors = await embeddings.embed(
+                    [f.claim for f in facts],
+                    call=CallSite(session_id, "embed_facts", 1),
+                )
+                for fact, vector in zip(facts, fact_vectors):
+                    src = sources_by_id.get(fact.source_id)
+                    if src is None:
+                        continue
+                    memory_rows.append(
+                        MemoryRow(
+                            company_key=state["company_key"],
+                            section=fact.section.value,
+                            freshness_class=fact.freshness_class.value,
+                            url=src.url,
+                            title=src.title,
+                            snippet=src.snippet,
+                            content_hash=src.content_hash,
+                            fact=fact.claim,
+                            fact_norm=fact.claim_norm,
+                            embedding=vector,
+                            fetched_at=src.fetched_at,
+                        )
+                    )
+
         # The report's Sources are the cited set (report_node derived them); persist
         # that set so the full-materialization replacement prunes any source the
         # loop-back left uncited (Codex F1).
@@ -385,6 +526,7 @@ def make_persist_node(
             model_meta=meta,
             report_chunks=report_chunks,
             source_chunks=source_chunks,
+            memory_rows=memory_rows,
         )
         log.info(
             "graph.persisted",

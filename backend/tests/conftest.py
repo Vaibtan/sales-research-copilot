@@ -55,3 +55,29 @@ async def checkpointer(settings: Settings):
     cp = await build_checkpointer(settings.database_url)
     yield cp
     await cp.close()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_cross_session_memory(settings: Settings):
+    """Isolate the one **cross-session** table. ``research_memory`` is keyed by
+    ``company_key`` (not session) and the dev DB is long-lived, so a prior test's
+    warm-start memory would otherwise pollute a cold-start expectation. Per-session
+    tables are keyed by a random ``session_id`` and don't collide, so they need no
+    reset. Best-effort: skipped if Postgres is down (keeps pure-unit tests
+    runnable without it)."""
+    import psycopg
+
+    try:
+        conn = await psycopg.AsyncConnection.connect(
+            settings.database_url, autocommit=True
+        )
+    except Exception:
+        yield
+        return
+    try:
+        await conn.execute("TRUNCATE research_memory")
+    except Exception:
+        pass  # table not migrated yet — the first DB test will create it
+    finally:
+        await conn.close()
+    yield

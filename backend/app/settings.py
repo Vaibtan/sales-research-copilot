@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     quality_threshold: float = 0.7  # τ — re-research below this score
     max_extra_passes: int = 1  # bounded loop-back budget
 
+    # --- Cross-session memory (PRD §7.1, §16; slice 11) -----------------
+    memory_ttl_durable_seconds: float = 14 * 86400  # 14d — Overview/Products warm-start
+    memory_ttl_volatile_seconds: float = 86400  # 1d — Signals/Risks re-fetched
+    memory_match_max_distance: float = 0.85  # cosine distance to bind memory→question
+
     # --- Durable call ledger (PRD §6.5; slice 6) -------------------------
     ledger_lease_seconds: float = 30.0  # reservation ownership before takeover
     ledger_heartbeat_seconds: float = 10.0  # owner lease-extension cadence

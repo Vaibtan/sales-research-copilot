@@ -17,7 +17,7 @@ from datetime import datetime
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from app.domain.identity import content_hash, new_message_id, report_id
+from app.domain.identity import content_hash, memory_id, new_message_id, report_id
 from app.domain.models import (
     ChatMessage,
     ChatPassage,
@@ -46,6 +46,40 @@ def _vec_literal(embedding: list[float]) -> str:
     """pgvector text input format ``[f1,f2,…]`` — cast with ``%s::vector`` so no
     extra driver adapter is needed."""
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+
+
+@dataclass(slots=True)
+class MemoryRow:
+    """A self-contained cross-session memory fact to upsert (§7.1, §10)."""
+
+    company_key: str
+    section: str
+    freshness_class: str
+    url: str
+    title: str
+    snippet: str
+    content_hash: str
+    fact: str
+    fact_norm: str
+    embedding: list[float]
+    fetched_at: datetime
+
+
+@dataclass(slots=True)
+class MemoryMatch:
+    """A recalled memory candidate + its cosine distance to a plan question."""
+
+    id: str
+    section: str
+    freshness_class: str
+    url: str
+    title: str
+    snippet: str
+    content_hash: str
+    fact: str
+    fact_norm: str
+    fetched_at: datetime
+    distance: float
 
 
 def _materialization_hash(report: ResearchReport) -> str:
@@ -135,6 +169,7 @@ async def persist_results(
     model_meta: dict | None = None,
     report_chunks: list[ChunkRow] | None = None,
     source_chunks: list[ChunkRow] | None = None,
+    memory_rows: list[MemoryRow] | None = None,
 ) -> None:
     """Write the full session materialization in one transaction.
 
@@ -283,6 +318,32 @@ async def persist_results(
                             (c.id, session_id, c.owner, c.chunk_ix, c.text,
                              _vec_literal(c.embedding))
                             for c in source_chunks
+                        ],
+                    )
+                if memory_rows:
+                    # Upsert cross-session memory for future warm-starts (§7.1).
+                    # Self-contained — keyed by (company_key, content_hash,
+                    # fact_norm), refreshing last_validated_at on conflict.
+                    await cur.executemany(
+                        "INSERT INTO research_memory (id, company_key, section,"
+                        " freshness_class, url, title, snippet, content_hash, fact,"
+                        " fact_norm, embedding, fetched_at, last_validated_at)"
+                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector,"
+                        " %s, now())"
+                        " ON CONFLICT (company_key, content_hash, fact_norm) DO UPDATE"
+                        " SET section = EXCLUDED.section,"
+                        " freshness_class = EXCLUDED.freshness_class,"
+                        " url = EXCLUDED.url, title = EXCLUDED.title,"
+                        " snippet = EXCLUDED.snippet, fact = EXCLUDED.fact,"
+                        " embedding = EXCLUDED.embedding, last_validated_at = now()",
+                        [
+                            (
+                                memory_id(m.company_key, m.content_hash, m.fact_norm),
+                                m.company_key, m.section, m.freshness_class, m.url,
+                                m.title, m.snippet, m.content_hash, m.fact, m.fact_norm,
+                                _vec_literal(m.embedding), m.fetched_at,
+                            )
+                            for m in memory_rows
                         ],
                     )
 
@@ -469,6 +530,62 @@ async def list_messages(db: Database, session_id: str) -> list[ChatMessage]:
         )
         for r in rows
     ]
+
+
+# --- cross-session memory (slice 11) -----------------------------------------
+
+
+async def match_memory(
+    db: Database,
+    *,
+    company_key: str,
+    section: str,
+    query_vector: list[float],
+    exclude_ids: list[str],
+    max_distance: float,
+) -> MemoryMatch | None:
+    """The nearest unused memory row for ``company_key`` **in the question's
+    section** within ``max_distance`` (cosine), or ``None`` — the semantic bind of
+    a memory fact to a plan question (§7.1). Scoping to the section keeps a fact
+    from one section (e.g. Products) from ever being bound to another (e.g. Risks),
+    which would fabricate a section that should stay an honest Unknown."""
+    vec = _vec_literal(query_vector)
+    async with db.pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT id, section, freshness_class, url, title, snippet,"
+                " content_hash, fact, fact_norm, fetched_at,"
+                " (embedding <=> %s::vector) AS distance"
+                " FROM research_memory"
+                " WHERE company_key = %s AND section = %s AND id <> ALL(%s::text[])"
+                " ORDER BY distance ASC LIMIT 1",
+                (vec, company_key, section, exclude_ids),
+            )
+            row = await cur.fetchone()
+    if row is None or row["distance"] > max_distance:
+        return None
+    return MemoryMatch(
+        id=row["id"],
+        section=row["section"],
+        freshness_class=row["freshness_class"],
+        url=row["url"],
+        title=row["title"],
+        snippet=row["snippet"],
+        content_hash=row["content_hash"],
+        fact=row["fact"],
+        fact_norm=row["fact_norm"],
+        fetched_at=row["fetched_at"],
+        distance=row["distance"],
+    )
+
+
+async def touch_memory_validated(db: Database, memory_id_: str) -> None:
+    async with db.pool.connection() as conn:
+        await conn.execute(
+            "UPDATE research_memory SET last_validated_at = now() WHERE id = %s",
+            (memory_id_,),
+        )
+        await conn.commit()
 
 
 async def recent_turns(db: Database, session_id: str, *, limit: int) -> list[dict]:

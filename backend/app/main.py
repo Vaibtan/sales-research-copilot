@@ -46,6 +46,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if providers.verify is not None:
         # Fail fast on an unknown/unavailable model id before serving (§16).
         await providers.verify()
+
+    # Memory revalidator: only the real fetch path can re-validate a stale memory
+    # url by content_hash (§7.1). With mocks it stays None, so stale volatile facts
+    # are simply re-derived by gather.
+    memory_revalidator = None
+    if providers.model_meta.get("providers") != "mock":
+        from app.domain.identity import content_hash
+        from app.providers.fetch import fetch_text
+
+        async def memory_revalidator(url: str) -> str | None:  # noqa: F811
+            try:
+                body = await fetch_text(
+                    url,
+                    timeout=settings.fetch_timeout_seconds,
+                    max_bytes=settings.fetch_max_bytes,
+                    allow_private=settings.allow_private_fetch,
+                )
+                return content_hash(body)
+            except Exception:  # noqa: BLE001 — revalidation is best-effort
+                return None
     ledger = CallLedger(
         db,
         LedgerConfig(
@@ -66,6 +86,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model_meta=providers.model_meta,
         retry_max_attempts=settings.retry_max_attempts,
         embeddings=providers.embeddings,
+        memory_ttl_durable_seconds=settings.memory_ttl_durable_seconds,
+        memory_ttl_volatile_seconds=settings.memory_ttl_volatile_seconds,
+        memory_match_max_distance=settings.memory_match_max_distance,
+        memory_revalidator=memory_revalidator,
     )
     progress_bus = ProgressBus(cache)
     runner = GraphRunner(graph, db, progress_bus)

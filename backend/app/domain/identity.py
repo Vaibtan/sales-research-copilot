@@ -81,5 +81,10 @@ def source_chunk_id(source_id_: str, chunk_ix: int) -> str:
     return _digest("source", source_id_, str(chunk_ix))
 
 
+def memory_id(company_key: str, content_hash_: str, fact_norm: str) -> str:
+    """research_memory natural key (§10): self-contained, x-session."""
+    return _digest("memory", company_key, content_hash_, fact_norm)
+
+
 def content_hash(text: str) -> str:
     return _digest(text)
