@@ -537,6 +537,18 @@ FE responsive-design requirement.
 
 ---
 
+## Post-build adversarial review (2026-06-23)
+
+After all 15 slices, a multi-agent review (5 subsystem reviewers → adversarial
+verify) confirmed **12 findings** (1 high, 6 medium, 5 low). **11 fixed** (commit
+`c71c1b6`): SSRF redirect re-validation + CGNAT deny-range; ledger
+produce-after-takeover recovery + heartbeat resilience; F3 `adelete_thread` failure
+surfaced (not suppressed); recall TTL keyed on `last_validated_at`; loop-back skips
+stale-attempt assignments; `gather_one` construction under the degrade guard; chat
+server-side must-cite-or-decline; `verify_models` clear boot error. **1 documented**
+(low): DNS-rebinding TOCTOU (validate-vs-connect) needs connection IP-pinning —
+noted in `fetch.py`, out of scope. **Backend suite: 101 pass.**
+
 ## Fast-follow backlog (post-MVP — outside the gate)
 
 Explicitly **deferred** in PRD §13 / §0. Tracked here so they're not forgotten, but **not** part of the
