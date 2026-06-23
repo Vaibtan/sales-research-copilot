@@ -156,7 +156,15 @@ class GraphRunner:
                 if phase in _TERMINAL:  # defensive — a live `next` shouldn't be terminal
                     phase = "recalling"
             elif fresh_state is not None:
-                graph_input = fresh_state  # fresh upgrade attempt from END
+                # Fresh upgrade attempt from END. Clear the completed thread's
+                # checkpoint first: a same-thread re-invoke would otherwise MERGE
+                # this run's reducer channels (sources/facts/errors/`degraded`) with
+                # the old run's, so the upgrade could never shed the prior degraded
+                # state. Deleting the checkpoint makes it a truly clean run; the
+                # relational session/report rows are untouched.
+                with contextlib.suppress(Exception):
+                    await self._graph.checkpointer.adelete_thread(session_id)
+                graph_input = fresh_state
                 phase = "planning"
             else:
                 return False  # at END, no upgrade requested → no-op

@@ -21,6 +21,7 @@ from app.domain.models import (
     Source,
 )
 from app.domain.reducers import (
+    keep_degraded,
     merge_by_id,
     supersede_assignments_by_question,
     supersede_by_question,
@@ -59,6 +60,6 @@ class ResearchState(TypedDict):
     weak_questions: list[str]
     answered_questions: list[str]  # question_ids satisfied by recall (gather skips)
     reused_from_memory: bool
-    degraded: bool
+    degraded: Annotated[bool, keep_degraded]
     status: Status
     errors: Annotated[list[NodeErrorRecord], operator.add]

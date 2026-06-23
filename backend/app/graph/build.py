@@ -25,6 +25,7 @@ from app.graph.nodes import (
     make_error_handler,
     make_extract_node,
     make_gather_node,
+    make_gather_one_node,
     make_persist_node,
     make_plan_node,
     make_quality_node,
@@ -93,14 +94,19 @@ def build_graph(
             revalidator=memory_revalidator,
         ),
     )
-    # gather/extract/analyze failures (after retries) degrade to an honest partial
-    # report via the error_handler instead of aborting (§6.1).
+    # gather fans out (slice 13): the dispatcher (no network) Sends a parallel
+    # gather_one worker per question; the worker is the network-bound, retried,
+    # degradable unit. A failed worker routes to extract (its normal successor) so
+    # the other questions' evidence still flows — that question becomes an Unknown.
+    builder.add_node("gather", make_gather_node(max_extra_passes=max_extra_passes))
+    # gather_one self-handles retry + degrade internally (a node-level error_handler
+    # does not apply to Send-invoked workers), so no retry_policy/error_handler here.
     builder.add_node(
-        "gather",
-        make_gather_node(search, max_extra_passes=max_extra_passes),
-        retry_policy=net_retry,
-        error_handler=make_error_handler("gather"),
+        "gather_one",
+        make_gather_one_node(search, retry_max_attempts=retry_max_attempts),
     )
+    # extract/analyze failures (after retries) degrade to an honest partial report
+    # via the error_handler instead of aborting (§6.1).
     builder.add_node(
         "extract",
         make_extract_node(llm, max_extra_passes=max_extra_passes),
@@ -129,7 +135,9 @@ def build_graph(
     builder.add_edge("plan", "await_approval")
     builder.add_edge("await_approval", "recall")
     builder.add_edge("recall", "gather")
-    builder.add_edge("gather", "extract")
+    # gather → {Send(gather_one) … | extract} is a Command(goto=...) from the
+    # dispatcher; the fan-out workers rejoin at extract.
+    builder.add_edge("gather_one", "extract")
     builder.add_edge("extract", "analyze")
     builder.add_edge("analyze", "quality_gate")
     # quality_gate → {gather (loop-back) | report} is a Command(goto=...) from the

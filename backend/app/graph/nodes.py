@@ -9,11 +9,12 @@ arrive in later slices; the topology here is the straight-through spine
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Literal
 
 from langgraph.errors import NodeError
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, Send, interrupt
 
 from app.db.repository import (
     ChunkRow,
@@ -52,6 +53,7 @@ from app.infra.database import Database
 from app.logging import get_logger
 from app.providers.base import CallSite, LLMClient, LLMTask, SearchProvider
 from app.providers.embeddings import EmbeddingClient
+from app.providers.errors import is_transient
 from app.providers.contexts import (
     AnalyzeContext,
     ExtractContext,
@@ -253,48 +255,111 @@ def make_recall_node(
     return recall
 
 
-def make_gather_node(search: SearchProvider, *, max_extra_passes: int):
-    async def gather(state: ResearchState) -> dict:
+def make_gather_node(*, max_extra_passes: int):
+    """Dispatcher (slice 13): fan out a parallel ``Send`` to ``gather_one`` per
+    question to research — the first pass over questions NOT answered by recall, a
+    loop-back over only the weak questions (§6.1). Routes straight to ``extract``
+    when there's nothing to gather (everything recalled)."""
+
+    async def gather(state: ResearchState) -> Command[Literal["gather_one", "extract"]]:
         plan = state["plan"]
         assert plan is not None
         attempt = max_extra_passes - state["retries_left"] + 1
         weak = set(state.get("weak_questions") or [])
         answered = set(state.get("answered_questions") or [])
-        # Loop-back re-researches only weak questions; the first pass researches the
-        # questions NOT already answered by recall (§6.1).
         if weak:
             questions = [q for q in plan.questions if q.id in weak]
         else:
             questions = [q for q in plan.questions if q.id not in answered]
 
-        sources: list[Source] = []
-        assignments: list[QuestionSource] = []
-        for question in questions:
-            hits = await search.search(
-                f"{state['company']} {question.text}", max_results=2
+        if not questions:
+            return Command(goto="extract")
+        sends = [
+            Send(
+                "gather_one",
+                {
+                    "session_id": state["session_id"],
+                    "company": state["company"],
+                    "attempt": attempt,
+                    "question": question,
+                },
             )
-            for hit in hits:
-                sid = source_id(state["session_id"], hit.url)
-                sources.append(
-                    Source(
-                        id=sid,
-                        url=normalize_url(hit.url),
-                        title=hit.title,
-                        snippet=hit.snippet,
-                        content_hash=content_hash(hit.content or hit.snippet),
-                        fetched_at=_now(),
-                    )
-                )
-                # Stamp the attempt so a loop-back supersedes this question's older
-                # links (Codex F1) — extract then re-runs only over the fresh hits.
-                assignments.append(
-                    QuestionSource(
-                        question_id=question.id, source_id=sid, attempt=attempt
-                    )
-                )
-        return {"sources": sources, "assignments": assignments, "status": "gathering"}
+            for question in questions
+        ]
+        return Command(goto=sends)
 
     return gather
+
+
+def make_gather_one_node(search: SearchProvider, *, retry_max_attempts: int = 3):
+    """Worker (slice 13): research a *single* question. Runs concurrently across the
+    fan-out; the ``merge_by_id`` / ``supersede_assignments_by_question`` reducers
+    keep concurrent source/assignment merges idempotent.
+
+    The worker **self-handles** failure: a node-level ``error_handler`` does not
+    apply to ``Send``-invoked workers, so it retries transient errors itself and, on
+    a permanent/exhausted failure, degrades *this question* (returns no sources +
+    ``degraded=True``) rather than aborting the whole fan-out — the other questions'
+    evidence still flows, and the failed one becomes an honest Unknown (§6.1)."""
+
+    async def gather_one(payload: dict) -> dict:
+        question = payload["question"]
+        session_id = payload["session_id"]
+        attempt = payload["attempt"]
+        query = f"{payload['company']} {question.text}"
+
+        tries = 0
+        while True:
+            tries += 1
+            try:
+                hits = await search.search(query, max_results=2)
+                break
+            except Exception as exc:  # noqa: BLE001 — classify then retry/degrade
+                if is_transient(exc) and tries < retry_max_attempts:
+                    await asyncio.sleep(0.2 * tries)
+                    continue
+                log.warning(
+                    "graph.gather_one_degraded",
+                    session_id=session_id,
+                    question_id=question.id,
+                    error_type=type(exc).__name__,
+                )
+                return {
+                    "degraded": True,
+                    "errors": [
+                        NodeErrorRecord(
+                            node="gather",
+                            error_type=type(exc).__name__,
+                            message=str(exc)[:500],
+                        )
+                    ],
+                }
+
+        sources: list[Source] = []
+        assignments: list[QuestionSource] = []
+        for hit in hits:
+            sid = source_id(session_id, hit.url)
+            sources.append(
+                Source(
+                    id=sid,
+                    url=normalize_url(hit.url),
+                    title=hit.title,
+                    snippet=hit.snippet,
+                    content_hash=content_hash(hit.content or hit.snippet),
+                    fetched_at=_now(),
+                )
+            )
+            # Stamp the attempt so a loop-back supersedes this question's older links
+            # (Codex F1) — extract then re-runs only over the fresh hits.
+            assignments.append(
+                QuestionSource(question_id=question.id, source_id=sid, attempt=attempt)
+            )
+        # Workers run concurrently → only write the reducer-merged channels
+        # (sources/assignments). `status` is a single-value channel already set to
+        # "gathering" by recall; writing it here would collide across the fan-out.
+        return {"sources": sources, "assignments": assignments}
+
+    return gather_one
 
 
 def make_extract_node(llm: LLMClient, *, max_extra_passes: int):
@@ -459,25 +524,30 @@ async def report_node(state: ResearchState) -> dict:
     return {"report": final, "status": "reporting"}
 
 
-def make_error_handler(node: str):
+def make_error_handler(node: str, *, goto: str = "report"):
     """Build an ``error_handler`` (langgraph ≥1.2) that converts a node failure —
-    *after* its RetryPolicy is exhausted — into a degraded run: route to ``report``
-    with ``degraded=True`` and record the error, so the graph yields an honest
-    partial report instead of aborting (PRD §6.1, never a 500)."""
+    *after* its RetryPolicy is exhausted — into a degraded run instead of aborting
+    (PRD §6.1, never a 500). A failed ``gather_one`` worker routes to ``extract``
+    (its normal successor) so the *other* questions' evidence still flows through;
+    extract/analyze failures route to ``report``. The failed unit contributes no
+    facts → an honest Unknown, with ``degraded=True`` recorded.
 
-    def handle(state: ResearchState, error: NodeError) -> Command:
+    ``error_handler`` receives ``(payload_or_state, error)``; the payload of a
+    ``gather_one`` Send may lack ``session_id``, so read it defensively."""
+
+    def handle(state, error: NodeError) -> Command:
         original = getattr(error, "error", error)
+        session_id = state.get("session_id") if isinstance(state, dict) else None
         log.warning(
             "graph.node_degraded",
             node=node,
-            session_id=state["session_id"],
+            session_id=session_id,
             error_type=type(original).__name__,
         )
         return Command(
-            goto="report",
+            goto=goto,
             update={
                 "degraded": True,
-                "status": "reporting",
                 "errors": [
                     NodeErrorRecord(
                         node=node,

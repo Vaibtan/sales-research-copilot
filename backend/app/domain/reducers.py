@@ -12,6 +12,14 @@ from __future__ import annotations
 from app.domain.models import Fact, QuestionSource, Source
 
 
+def keep_degraded(left: bool | None, right: bool | None) -> bool:
+    """OR-merge the ``degraded`` flag: once any node/worker degrades, the run stays
+    degraded. Needed because the parallel ``gather_one`` fan-out (slice 13) can have
+    several workers set ``degraded=True`` concurrently — a single-value channel
+    would reject the concurrent writes."""
+    return bool(left) or bool(right)
+
+
 def merge_by_id(left: list[Source] | None, right: list[Source] | None) -> list[Source]:
     """Dedupe sources by ``id``; the most recent value wins, order preserved."""
     merged: dict[str, Source] = {s.id: s for s in (left or [])}

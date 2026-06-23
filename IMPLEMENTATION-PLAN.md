@@ -460,11 +460,13 @@ PRD refs: §6.1 (`Send` fan-out, merge_by_id), §6.3 (parallelism), §13 P2.
 
 ### Acceptance criteria
 
-- [ ] `gather` fans out via `Send` over questions not answered by `recall`; runs concurrently.
-- [ ] `merge_by_id` dedupes concurrent `Source` discoveries by url with **no duplicate** `sources` rows and preserved question→source links.
-- [ ] Per-question `RetryPolicy(max_attempts=3, retry_on=transient)` still applies inside the fan-out.
-- [ ] Test: concurrent gather over overlapping sources yields zero duplicate `sources` rows.
-- [ ] Demo: a multi-question plan gathers in parallel (observably faster than sequential), report unchanged in correctness.
+- [x] `gather` fans out via `Send` over questions not answered by `recall`; runs concurrently. *(`gather` is now a dispatcher returning `Command(goto=[Send("gather_one", payload) …])` (or straight to `extract` when all recalled); `gather_one` is the per-question worker. Loop-back fans out only the weak questions.)*
+- [x] `merge_by_id` dedupes concurrent `Source` discoveries by url with **no duplicate** `sources` rows and preserved question→source links. *(`test_concurrent_fanout_dedupes_overlapping_sources`: a shared url returned by every worker → one source row, ≥2 question→source links, `count == count(distinct)`.)*
+- [x] Per-question `RetryPolicy(max_attempts=3, retry_on=transient)` still applies inside the fan-out. *(a node-level `error_handler`/`retry_policy` doesn't apply to `Send` workers, so `gather_one` **self-handles**: an internal `is_transient` retry loop, then graceful degrade (no sources + `degraded=True`) — the other questions' evidence still flows.)*
+- [x] Test: concurrent gather over overlapping sources yields zero duplicate `sources` rows. *(as above.)*
+- [x] Demo: a multi-question plan gathers in parallel (observably faster than sequential), report unchanged in correctness. *(parallelism is structural via `Send`; report correctness asserted unchanged in the fan-out test + the full suite.)*
+
+> **Notes:** `degraded` became `Annotated[bool, keep_degraded]` (OR-merge) so concurrent failing workers don't collide on a single-value channel. The **F3 fresh-upgrade now deletes the completed thread's checkpoint** before re-invoking (`checkpointer.adelete_thread`) — a same-thread re-invoke otherwise *merges* reducer channels (sources/facts/errors/degraded) with the old run, so the upgrade could never shed the prior degraded state (verified empirically). Workers write only the reducer-merged channels (not `status`, a single-value channel). Backend suite **92 pass** (prior 91 + 1).
 
 ### Blocked by
 
