@@ -25,7 +25,9 @@ class OverlappingSearch:
 
     SHARED = "https://shared.example/common"
 
-    async def search(self, query: str, *, max_results: int = 5) -> list[SearchHit]:
+    async def search(
+        self, query: str, *, max_results: int = 5, call=None
+    ) -> list[SearchHit]:
         if "risk" in query.lower():
             return []
         slug = "-".join(query.lower().split())[:40]

@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from app.logging import get_logger
-from app.providers.base import SearchHit
+from app.providers.base import CallSite, SearchHit
 from app.providers.fetch import SsrfError, fetch_text
 
 if TYPE_CHECKING:
@@ -39,7 +39,13 @@ class TavilySearchProvider:
         self._fetch_max_bytes = fetch_max_bytes
         self._allow_private_fetch = allow_private_fetch
 
-    async def search(self, query: str, *, max_results: int = 5) -> list[SearchHit]:
+    async def search(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+        call: CallSite | None = None,
+    ) -> list[SearchHit]:
         response = await self._client.search(
             query,
             max_results=max_results,

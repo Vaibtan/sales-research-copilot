@@ -60,7 +60,13 @@ class MockSearchProvider:
     """Deterministic search. Returns nothing for risk-related queries so the
     Risks & Challenges section lands in Unknowns (honest-gaps demo)."""
 
-    async def search(self, query: str, *, max_results: int = 5) -> list[SearchHit]:
+    async def search(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+        call: CallSite | None = None,
+    ) -> list[SearchHit]:
         if "risk" in query.lower():
             return []
         slug = "-".join(query.lower().split())[:60]

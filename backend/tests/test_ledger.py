@@ -18,12 +18,13 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from app.db.ledger import CallLedger, LedgerConfig, LedgerKey
 from app.db.repository import create_session, get_session_detail
 from app.domain.identity import new_session_id
 from app.graph.build import build_graph, build_initial_state
-from app.providers.base import LLMTask
+from app.providers.base import CallSite, LLMTask
 from app.providers.mock import MockLLMClient, MockSearchProvider
 
 pytestmark = pytest.mark.asyncio
@@ -213,6 +214,162 @@ async def test_failed_row_is_retryable(db):
     assert attempts == 2
 
 
+# --- lost-ownership commit → only committed values reach the caller ----------
+
+
+async def test_run_returns_committed_value_not_local_after_losing_ownership(db):
+    """Codex finding: if our commit CAS fails because we lost ownership mid-flight
+    and the row is **not yet done** (the takeover owner is still working), the old
+    code fell through to ``return response`` — handing the caller a value the
+    durable ledger never recorded. The invariant: whatever ``run`` returns must
+    equal the committed row, so a resume replays the same value the run saw."""
+    ledger = _ledger(db, lease=5.0, hb=100.0, poll=0.05, timeout=5.0)
+    key = _key("extract", "lostown")
+    took_over = {"done": False}
+
+    async def produce(idem: str) -> dict:
+        if not took_over["done"]:
+            took_over["done"] = True
+            # Simulate a takeover happening *during* our provider call: a different
+            # owner (B) grabs the row, still ``in_progress`` (not committed) and with
+            # an already-expired lease (B also stalled). Our subsequent commit CAS
+            # will fail, and the row is NOT done — the exact buggy window.
+            async with db.pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE llm_calls SET locked_by='owner-B', status='in_progress',"
+                    " lease_expires_at = now() - make_interval(secs => 10),"
+                    " updated_at=now()"
+                    " WHERE session_id=%s AND node=%s AND attempt=%s AND input_hash=%s",
+                    (key.session_id, key.node, key.attempt, key.input_hash),
+                )
+                await conn.commit()
+            return {"v": "A-first-uncommitted"}
+        return {"v": "A-second-committed"}
+
+    result = await asyncio.wait_for(ledger.run(key, produce), timeout=5.0)
+
+    final = await ledger._read(key)
+    assert final is not None and final["status"] == "done", (
+        "run must not return while the key is left uncommitted"
+    )
+    assert result == final["response_jsonb"], (
+        "caller must get the committed value, never a local uncommitted one"
+    )
+
+
+async def test_lost_ownership_producer_exception_re_resolves_not_raises(db):
+    """Codex re-review: the lost-ownership fix must also cover the *exception* path.
+    If ``produce()`` raises *after* a takeover changed ``locked_by``, our ``_fail``
+    can't mark the row (owner mismatch) and the durable row is still authoritative —
+    so the stale local exception must NOT escape and fail/degrade the node. ``run``
+    must re-resolve (re-read / take over) exactly like the failed-commit path."""
+    ledger = _ledger(db, lease=5.0, hb=100.0, poll=0.05, timeout=5.0)
+    key = _key("extract", "lostown-exc")
+    calls = 0
+
+    async def produce(idem: str) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # Simulate losing ownership *during* our call: a takeover owner (B) grabs
+            # the row and also stalls (still in_progress, expired lease). Our later
+            # ``_fail`` won't match locked_by, so our exception is non-authoritative.
+            async with db.pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE llm_calls SET locked_by='owner-B', status='in_progress',"
+                    " lease_expires_at = now() - make_interval(secs => 10),"
+                    " updated_at=now()"
+                    " WHERE session_id=%s AND node=%s AND attempt=%s AND input_hash=%s",
+                    (key.session_id, key.node, key.attempt, key.input_hash),
+                )
+                await conn.commit()
+            raise RuntimeError("provider boom after losing ownership")
+        return {"v": "recovered-after-takeback"}
+
+    # The stale RuntimeError from the non-authoritative owner must not surface; run
+    # re-resolves, takes the expired row back, and completes on the retry.
+    result = await asyncio.wait_for(ledger.run(key, produce), timeout=5.0)
+    assert result == {"v": "recovered-after-takeback"}
+    assert calls == 2, "must re-resolve and re-produce, not raise the stale local error"
+
+    final = await ledger._read(key)
+    assert final is not None and final["status"] == "done"
+
+
+# --- ledger key fingerprints the full output schema, not just its name -------
+
+
+async def test_output_schema_change_is_a_distinct_ledger_call(db):
+    """Codex finding: the ledger input hash keyed on the output *class name* — so a
+    changed schema (added/removed fields) behind the same name replayed stale cached
+    output across deploys. Two same-named schemas with different fields must be
+    distinct ledger calls, or a resume after a schema change serves the old shape."""
+    from pydantic import create_model
+
+    from app.providers.ledger import LedgerLLMClient
+
+    Ctx = create_model("Ctx", q=(str, "hello"))
+    Out1 = create_model("SameName", a=(int, 1))
+    Out2 = create_model("SameName", a=(int, 1), b=(str, "x"))  # extra field, same name
+
+    class _CountingLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def parse(self, *, task, context, output_type, model=None,
+                        idempotency_key=None):
+            self.calls += 1
+            return output_type()
+
+    inner = _CountingLLM()
+    client = LedgerLLMClient(inner, _ledger(db))
+    ctx = Ctx()
+    call = CallSite(new_session_id(), "plan", 1)  # identical call-site for both
+
+    await client.parse(task=LLMTask.PLAN, context=ctx, output_type=Out1, call=call)
+    await client.parse(task=LLMTask.PLAN, context=ctx, output_type=Out2, call=call)
+
+    assert inner.calls == 2, (
+        "a changed output schema must be a distinct ledger call, not a stale cache hit"
+    )
+
+
+# --- search calls route through the durable ledger ---------------------------
+
+
+async def test_search_routes_through_ledger_not_repaid_on_resume(db):
+    """Codex finding: ``gather_one`` called ``search.search()`` directly, bypassing
+    the ledger — so a crash/resume re-paid the external Tavily search. Behind the
+    ledger, the same call-site is served from the committed row (no re-pay); a
+    loop-back re-research (a higher ``attempt``) is a distinct, fresh search."""
+    from app.providers.base import SearchHit
+    from app.providers.ledger import LedgerSearchProvider
+
+    class _CountingSearch:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def search(self, query, *, max_results=5, call=None):
+            self.calls += 1
+            return [SearchHit(url=f"https://x/{self.calls}", title="t", snippet="s")]
+
+    inner = _CountingSearch()
+    search = LedgerSearchProvider(inner, _ledger(db))
+    sid = new_session_id()
+    call = CallSite(sid, "gather_one", 1)
+
+    first = await search.search("acme products", max_results=2, call=call)
+    second = await search.search("acme products", max_results=2, call=call)
+    assert inner.calls == 1, "a resume must read the committed search, not re-pay"
+    assert [h.url for h in first] == [h.url for h in second]
+
+    # A loop-back re-research (attempt=2) is a fresh, distinct search.
+    await search.search(
+        "acme products", max_results=2, call=CallSite(sid, "gather_one", 2)
+    )
+    assert inner.calls == 2
+
+
 # --- graph integration -------------------------------------------------------
 
 
@@ -260,7 +417,9 @@ async def test_graph_routes_llm_calls_through_ledger(db, checkpointer):
         )
         rows = await cur.fetchall()
     nodes = {node for node, _ in rows}
-    assert {"plan", "extract", "analyze", "quality_gate"} <= nodes
+    # gather_one proves the Tavily search path is ledgered too (Codex follow-up), not
+    # just the LLM calls — so a resume re-pays no external search.
+    assert {"plan", "gather_one", "extract", "analyze", "quality_gate"} <= nodes
     assert all(status == "done" for _, status in rows)
 
     detail = await get_session_detail(db, session_id)

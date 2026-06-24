@@ -549,6 +549,52 @@ server-side must-cite-or-decline; `verify_models` clear boot error. **1 document
 (low): DNS-rebinding TOCTOU (validate-vs-connect) needs connection IP-pinning —
 noted in `fetch.py`, out of scope. **Backend suite: 101 pass.**
 
+## Codex adversarial review (2026-06-24)
+
+A second, independent challenge review (`/codex:adversarial-review --base 8029cc2`,
+the full 113-file build) returned **needs-attention** with 5 findings (3 high, 2
+medium). After re-verifying each against the code, **3 new defects were fixed via
+TDD**. A follow-up re-review of those fixes (working-tree scope) confirmed the new
+tests are not shallow and the schema/search/commit-CAS fixes hold, but caught the
+lost-ownership fix's **exception-path twin** — now also fixed (4 fixes total). Backend
+suite **105 pass** = 101 + 4 regression tests (commit pending):
+
+- **[high] Ledger lost-ownership commit** (`db/ledger.py`): when the commit CAS
+  failed and the takeover owner was not yet `done`, `_produce_and_commit` returned
+  the **local uncommitted** response — a value the durable ledger never recorded,
+  which a resume would then replay differently. Fixed: a failed commit now returns
+  `None` to signal `run` to re-resolve from the authoritative row; only a committed
+  value enters graph state. Regression: `test_run_returns_committed_value_not_local_after_losing_ownership`.
+  - **Follow-up (re-review, same finding's exception twin):** the first fix only
+    covered the commit path; the **producer-exception** path had the identical hole
+    — if `produce()` raised *after* a takeover changed `locked_by`, `_fail` matched
+    nothing and the stale local exception escaped, failing/degrading the node from a
+    non-authoritative owner while the durable row could still commit. Fixed: `_fail`
+    now returns whether it still owned the row; on lost ownership the exception path
+    re-resolves (committed value if any, else `None` → `run` re-reads/takes over)
+    instead of raising. An *owned* failure still raises (retryable, unchanged).
+    Regression: `test_lost_ownership_producer_exception_re_resolves_not_raises`.
+- **[medium] Ledger key omitted schema/prompt** (`providers/ledger.py`): `_input_hash`
+  fingerprinted the output **class name**, so a changed schema behind the same name
+  replayed stale cache across deploys. Fixed: hash the full `model_json_schema()` +
+  a bumpable `_LEDGER_INPUT_VERSION` namespace (covers prompt/token-cap changes).
+  Regression: `test_output_schema_change_is_a_distinct_ledger_call`.
+- **[medium] Search bypassed the ledger** (`graph/nodes.py` + `graph/build.py`):
+  `gather_one` called `search.search()` directly, so a mid-fan-out crash re-paid
+  Tavily on resume — contradicting the slice-6 note that search is ledgered. Fixed:
+  new `LedgerSearchProvider` (keyed by session/node/attempt/query/max_results),
+  wired in `build_graph`, `gather_one` passes a `CallSite`. Regression:
+  `test_search_routes_through_ledger_not_repaid_on_resume` + the graph-integration
+  test now asserts `gather_one` ledger rows.
+
+**2 findings left as documented MVP-scope** (single-instance assumption, PRD §3):
+(1) **[high] Resume single-flight is process-local** — the in-memory `_active`
+guard doesn't single-flight across API instances; needs a DB-backed run lease.
+Already noted in slice 5 (note b) / slice 6 carry-forward; tracked as a fast-follow.
+(2) **[high] SSRF DNS-rebinding** — the same validate-vs-connect TOCTOU already
+documented above (needs connection IP-pinning). Both require pushing past the MVP's
+stated single-instance / trusted-fetch boundary and are deferred deliberately.
+
 ## Fast-follow backlog (post-MVP — outside the gate)
 
 Explicitly **deferred** in PRD §13 / §0. Tracked here so they're not forgotten, but **not** part of the

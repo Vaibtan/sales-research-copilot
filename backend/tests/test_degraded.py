@@ -37,7 +37,7 @@ class FailingSearch:
     """Always raises a non-transient error → gather's RetryPolicy does not retry,
     so the error_handler fires immediately (degraded)."""
 
-    async def search(self, query: str, *, max_results: int = 5):
+    async def search(self, query: str, *, max_results: int = 5, call=None):
         raise RuntimeError("search backend unavailable")
 
 
@@ -49,7 +49,7 @@ class ToggleSearch:
         self.fail = True
         self._mock = MockSearchProvider()
 
-    async def search(self, query: str, *, max_results: int = 5):
+    async def search(self, query: str, *, max_results: int = 5, call=None):
         if self.fail:
             raise RuntimeError("search backend unavailable")
         return await self._mock.search(query, max_results=max_results)
