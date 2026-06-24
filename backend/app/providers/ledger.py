@@ -46,7 +46,7 @@ def _input_hash(
                 task.value,
                 model or "",
                 json.dumps(output_type.model_json_schema(), sort_keys=True),
-                context.model_dump_json(),
+                json.dumps(context.model_dump(mode="json"), sort_keys=True),
             )
         )
     )
