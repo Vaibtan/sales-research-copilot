@@ -35,7 +35,9 @@ class ShiftingSearch:
     def __init__(self) -> None:
         self.calls: Counter[str] = Counter()
 
-    async def search(self, query: str, *, max_results: int = 5) -> list[SearchHit]:
+    async def search(
+        self, query: str, *, max_results: int = 5, call=None
+    ) -> list[SearchHit]:
         if "risk" in query.lower():
             return []
         self.calls[query] += 1

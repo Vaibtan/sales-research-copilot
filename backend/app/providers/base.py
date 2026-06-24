@@ -69,4 +69,14 @@ class SearchHit(BaseModel):
 
 @runtime_checkable
 class SearchProvider(Protocol):
-    async def search(self, query: str, *, max_results: int = 5) -> list[SearchHit]: ...
+    async def search(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+        call: CallSite | None = None,
+    ) -> list[SearchHit]:
+        """Search for ``query``. ``call`` carries the ledger call-site (consumed by
+        :class:`~app.providers.ledger.LedgerSearchProvider` so a resume re-pays no
+        external search); a bare/mock provider ignores it."""
+        ...

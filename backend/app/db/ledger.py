@@ -89,7 +89,10 @@ class CallLedger:
         while True:
             owner = uuid4().hex
             if await self._reserve(key, owner):
-                return await self._produce_and_commit(key, owner, produce)
+                result = await self._produce_and_commit(key, owner, produce)
+                if result is not None:
+                    return result
+                continue  # lost ownership mid-flight — re-resolve the durable row
 
             row = await self._read(key)
             if row is None:
@@ -100,16 +103,20 @@ class CallLedger:
                 return row["response_jsonb"]
             if status == "failed":
                 if await self._take_failed(key, owner):
-                    return await self._produce_and_commit(key, owner, produce)
-                continue  # someone else grabbed the retry — re-read
+                    result = await self._produce_and_commit(key, owner, produce)
+                    if result is not None:
+                        return result
+                continue  # grabbed by another retrier, or we lost ownership — re-read
             # status == 'in_progress'
             if row["lease_expired"]:
                 if await self._take_expired(key, owner, prev_owner=row["locked_by"]):
                     log.info(
                         "ledger.takeover", node=key.node, session_id=key.session_id
                     )
-                    return await self._produce_and_commit(key, owner, produce)
-                continue  # lost the takeover race — re-read
+                    result = await self._produce_and_commit(key, owner, produce)
+                    if result is not None:
+                        return result
+                continue  # lost the takeover race, or lost ownership — re-read
             # A valid lease holds → single-flight: wait for the owner to commit.
             if waited >= deadline:
                 raise LedgerTimeout(f"timed out waiting on {key.node} reservation")
@@ -223,8 +230,13 @@ class CallLedger:
             except Exception:  # noqa: BLE001 — one bad beat must not stop heartbeating
                 log.warning("ledger.heartbeat_failed", node=key.node, exc_info=True)
 
-    async def _produce_and_commit(self, key: LedgerKey, owner: str, produce) -> dict:
+    async def _produce_and_commit(self, key: LedgerKey, owner: str, produce) -> dict | None:
         """Run the provider call (heartbeating the lease) then commit the result.
+
+        Returns the response on a successful commit. Returns ``None`` when we lost
+        ownership mid-flight and the takeover owner is not yet ``done`` — a signal
+        for ``run`` to re-resolve from the authoritative row (our uncommitted
+        response must never enter graph state).
 
         On a graceful failure the row is set ``failed`` so the key can be retried.
         A hard crash here leaves the row ``in_progress``; its lease then expires
@@ -233,28 +245,38 @@ class CallLedger:
         try:
             response = await produce(key.idempotency_key)
         except Exception:
-            await self._fail(key, owner)
-            # If we were taken over mid-flight and the new owner already committed,
-            # the call logically succeeded — return its result instead of surfacing
-            # a spurious failure to a still-alive caller (mirror the commit path).
+            # Only mark the row failed if we still own it. If a takeover changed
+            # `locked_by` mid-flight, our `_fail` matches nothing and our exception
+            # is NOT authoritative — the takeover owner is. Surfacing it would fail
+            # or degrade the node from a non-owner while the durable row is still
+            # in_progress and may yet commit (same divergence class as the
+            # uncommitted-response bug). So: owned → the failure is real, re-raise;
+            # lost → return the committed value if any, else None to re-resolve.
+            owned_failure = await self._fail(key, owner)
+            if owned_failure:
+                raise
             row = await self._read(key)
             if row is not None and row["status"] == "done":
                 return row["response_jsonb"]
-            raise
+            return None
         finally:
             hb.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await hb
 
         committed = await self._commit(key, owner, response)
-        if not committed:
-            # We were taken over mid-flight: the takeover owner is authoritative.
-            # Return the committed response so the caller still gets a value (the
-            # provider idempotency key meant our call was de-duped, not re-charged).
-            row = await self._read(key)
-            if row is not None and row["status"] == "done":
-                return row["response_jsonb"]
-        return response
+        if committed:
+            return response
+        # Commit CAS matched no row → we were taken over mid-flight. Our `response`
+        # was never recorded by the ledger, so it must NOT enter graph state — a
+        # resume would replay whatever the takeover owner commits, not this value.
+        # If the takeover already committed, hand back that authoritative value
+        # (the shared idempotency key meant our call was de-duped, not re-charged);
+        # otherwise signal `run` to re-resolve the key from the durable row.
+        row = await self._read(key)
+        if row is not None and row["status"] == "done":
+            return row["response_jsonb"]
+        return None
 
     async def _commit(self, key: LedgerKey, owner: str, response: dict) -> bool:
         async with self._db.pool.connection() as conn:
@@ -273,12 +295,18 @@ class CallLedger:
             await conn.commit()
         return committed
 
-    async def _fail(self, key: LedgerKey, owner: str) -> None:
+    async def _fail(self, key: LedgerKey, owner: str) -> bool:
+        """Mark the row ``failed`` (retryable) iff we still own it. Returns whether
+        the update matched — False means a takeover changed ``locked_by`` mid-flight,
+        so our failure is not authoritative."""
         async with self._db.pool.connection() as conn:
-            await conn.execute(
+            cur = await conn.execute(
                 "UPDATE llm_calls SET status='failed', locked_by=NULL, updated_at=now()"
                 " WHERE session_id=%s AND node=%s AND attempt=%s AND input_hash=%s"
-                " AND locked_by=%s",
+                " AND locked_by=%s"
+                " RETURNING status",
                 (key.session_id, key.node, key.attempt, key.input_hash, owner),
             )
+            owned = await cur.fetchone() is not None
             await conn.commit()
+        return owned

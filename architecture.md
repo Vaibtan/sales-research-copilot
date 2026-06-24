@@ -73,13 +73,18 @@ Two layers cooperate so a mid-run kill costs nothing:
    between nodes, so a resume continues from the last good checkpoint — completed
    nodes never re-execute.
 2. **The `llm_calls` ledger** (PRD §6.5) closes the *within-node* gap. Every LLM /
-   embedding call is keyed by `(session_id, node, attempt, input_hash)` and runs:
-   **reserve** (insert `in_progress` with an owner + lease) → **single-flight**
-   (a duplicate with a valid lease waits; a `done` row returns the cached
-   response) → **lease-takeover** (a crashed owner's expired lease is taken via
-   compare-and-swap) → **call with the ledger key as the provider idempotency
-   key** → **commit**. Lease math is evaluated DB-side to dodge clock skew; each
-   step is its own committed statement so cross-connection waiters observe it.
+   embedding / search call is keyed by `(session_id, node, attempt, input_hash)`
+   and runs: **reserve** (insert `in_progress` with an owner + lease) →
+   **single-flight** (a duplicate with a valid lease waits; a `done` row returns
+   the cached response) → **lease-takeover** (a crashed owner's expired lease is
+   taken via compare-and-swap) → **call with the ledger key as the provider
+   idempotency key** → **commit**. Only a committed result enters graph state — a
+   non-owner that lost a takeover (on either the commit *or* the exception path)
+   re-resolves from the authoritative row instead of returning its own value, so a
+   resume always replays what the run actually saw. Lease math is evaluated DB-side
+   to dodge clock skew; each step is its own committed statement so cross-connection
+   waiters observe it. (Search has no provider idempotency header, so the ledger's
+   committed-result short-circuit — not provider-side dedup — is its protection.)
 
 The honest guarantee (PRD §6.5): a committed call is never re-paid, and the single
 in-flight call at crash time is de-duped by the provider idempotency key.

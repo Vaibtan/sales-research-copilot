@@ -330,7 +330,13 @@ def make_gather_one_node(search: SearchProvider, *, retry_max_attempts: int = 3)
         while True:
             tries += 1
             try:
-                hits = await search.search(query, max_results=2)
+                # Route through the ledger (when present): a resume reads the
+                # committed hits for this question instead of re-paying Tavily.
+                hits = await search.search(
+                    query,
+                    max_results=2,
+                    call=CallSite(session_id, "gather_one", attempt),
+                )
                 break
             except Exception as exc:  # noqa: BLE001 — classify then retry/degrade
                 if is_transient(exc) and tries < retry_max_attempts:

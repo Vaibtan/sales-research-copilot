@@ -26,10 +26,11 @@ The cost: we write the node glue ourselves and own the structured-output parsing
 ### 2. Durability as two cooperating layers: checkpoint **plus** a durable call ledger
 
 **Decision.** Lean into recoverability as the headline feature. LangGraph
-checkpoints per super-step (resume skips completed nodes), and *every* LLM/embedding
-call is additionally wrapped in a durable `llm_calls` ledger keyed by
-`(session_id, node, attempt, input_hash)` — reserve → single-flight/lease-takeover
-(CAS) → provider-idempotency-key call → commit.
+checkpoints per super-step (resume skips completed nodes), and *every* LLM /
+embedding / search call is additionally wrapped in a durable `llm_calls` ledger
+keyed by `(session_id, node, attempt, input_hash)` — reserve →
+single-flight/lease-takeover (CAS) → provider-idempotency-key call → commit, with
+only a committed result ever entering graph state.
 
 **Alternatives considered.** (a) Checkpoint only — accept that a crash *mid-node*
 re-runs the node and re-pays its calls on resume; (b) an in-memory single-flight
@@ -60,7 +61,7 @@ returns nothing for "risk" queries to exercise the honest-Unknowns path; the moc
 embedding is a bag-of-words vector so retrieval is semantically meaningful offline).
 The cost: the mocks must be kept faithful, and the live path (slice 7) is built but
 its end-to-end behavior is verified by construction + injected fakes, not by a CI
-run against OpenAI. The payoff: 98 deterministic tests, zero secrets/network/flake
+run against OpenAI. The payoff: 105 deterministic tests, zero secrets/network/flake
 in CI, and a product a reviewer can run instantly without keys.
 
 ## Top technical debt items
@@ -103,9 +104,14 @@ the quality loop + fan-out can multiply token spend on hard companies.
    and record measured cost/run against the budget.
 3. **Conversational chat** (week 2): query rewriting, multi-hop retrieval, and
    citation-aware follow-ups; surface the `stale` signal more richly.
-4. **Cross-process durability hardening** (week 2): the ledger's lease is the
-   cross-process guard, but I'd add a chaos test that kills the API process
-   mid-node against the *real* provider to validate the no-double-charge guarantee
-   beyond the in-process simulation, plus a background reaper for abandoned leases.
+4. **Cross-process durability hardening** (week 2): the ledger lease single-flights
+   individual *calls* cross-process, but **resume / HITL graph re-entry is currently
+   single-flighted only in-process** (an in-memory `_active` set) — two API instances
+   could both re-enter one session. I'd add a DB-backed per-session **run lease**
+   (owner + expiry) acquired before reading/deleting checkpoints so duplicate resumes
+   409 across instances, plus a chaos test that kills the API process mid-node against
+   the *real* provider and a background reaper for abandoned leases. (The companion
+   SSRF DNS-rebinding TOCTOU — validate-vs-connect — wants connection IP-pinning in
+   the same pass; both are noted in [`IMPLEMENTATION-PLAN.md`](./IMPLEMENTATION-PLAN.md).)
 5. **Observability proof + dashboards** (week 2): stand up Langfuse, confirm traces
    land, and add per-node cost/latency dashboards + alerts on the error taxonomy.

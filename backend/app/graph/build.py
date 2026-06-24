@@ -41,7 +41,11 @@ from app.infra.database import Database
 from app.providers.base import LLMClient, SearchProvider
 from app.providers.embeddings import EmbeddingClient
 from app.providers.errors import is_transient
-from app.providers.ledger import LedgerEmbeddingClient, LedgerLLMClient
+from app.providers.ledger import (
+    LedgerEmbeddingClient,
+    LedgerLLMClient,
+    LedgerSearchProvider,
+)
 
 log = get_logger(__name__)
 
@@ -88,11 +92,12 @@ def build_graph(
     memory_revalidator=None,
     hitl_plan_approval: bool = False,
 ) -> CompiledStateGraph:
-    # Route every LLM / embedding call through the durable ledger (§6.5) so a
-    # mid-node kill re-pays nothing on resume. When no ledger is supplied (some unit
+    # Route every LLM / embedding / search call through the durable ledger (§6.5) so
+    # a mid-node kill re-pays nothing on resume. When no ledger is supplied (some unit
     # tests) the nodes call the provider directly.
     if ledger is not None:
         llm = LedgerLLMClient(llm, ledger)
+        search = LedgerSearchProvider(search, ledger)
         if embeddings is not None:
             embeddings = LedgerEmbeddingClient(embeddings, ledger)
 

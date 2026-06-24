@@ -11,13 +11,21 @@ pass-through.
 
 from __future__ import annotations
 
+import json
+
 from pydantic import BaseModel
 
 from app.db.ledger import CallLedger, LedgerKey
 from app.domain.identity import content_hash
 from app.observability import span
-from app.providers.base import CallSite, LLMClient, LLMTask, T
+from app.providers.base import CallSite, LLMClient, LLMTask, SearchHit, SearchProvider, T
 from app.providers.embeddings import EmbeddingClient
+
+# Bump this to invalidate every cached ledger row on an incompatible change that the
+# hash below can't see on its own — e.g. a reworded task instruction template or a
+# changed generation setting (token caps) in the OpenAI client. The output *schema*
+# is fingerprinted automatically, so only prompt/generation changes need a bump.
+_LEDGER_INPUT_VERSION = "1"
 
 
 def _input_hash(
@@ -25,14 +33,20 @@ def _input_hash(
 ) -> str:
     """Canonical fingerprint of everything that determines the response — so the
     same logical call re-derives the same ledger key, and any change (model, prompt
-    inputs, output schema) is a distinct call."""
+    inputs, output schema) is a distinct call.
+
+    The output is keyed on the full JSON **schema** (not just the class name): a
+    changed field set behind the same name is a distinct call, so a resume after a
+    deploy never replays output shaped for the old schema. ``_LEDGER_INPUT_VERSION``
+    covers prompt/generation changes the schema can't reflect (Codex finding)."""
     return content_hash(
         "\x1f".join(
             (
+                _LEDGER_INPUT_VERSION,
                 task.value,
                 model or "",
-                output_type.__name__,
-                context.model_dump_json(),
+                json.dumps(output_type.model_json_schema(), sort_keys=True),
+                json.dumps(context.model_dump(mode="json"), sort_keys=True),
             )
         )
     )
@@ -126,3 +140,50 @@ class LedgerEmbeddingClient:
         ):
             cached = await self._ledger.run(key, produce)
         return cached["vectors"]
+
+
+class LedgerSearchProvider:
+    """A :class:`SearchProvider` that de-duplicates search calls through the durable
+    ledger — so a crash/resume reads the committed hits instead of re-paying the
+    external search, and concurrent duplicate queries single-flight.
+
+    Unlike the LLM/embedding wrappers, a search backend can't honour a server-side
+    idempotency key (Tavily has no such header), so the ledger's ``done``
+    short-circuit is the protection — not provider-side dedup. The narrow window of
+    a crash *after* the search returns but *before* commit can still re-charge once
+    on takeover; everything else (every ordinary resume) is covered."""
+
+    def __init__(self, inner: SearchProvider, ledger: CallLedger) -> None:
+        self._inner = inner
+        self._ledger = ledger
+
+    async def search(
+        self,
+        query: str,
+        *,
+        max_results: int = 5,
+        call: CallSite | None = None,
+    ) -> list[SearchHit]:
+        if call is None:
+            # No call-site → can't key the ledger; pass straight through.
+            return await self._inner.search(query, max_results=max_results)
+
+        key = LedgerKey(
+            session_id=call.session_id,
+            node=call.node,
+            attempt=call.attempt,
+            input_hash=content_hash("\x1f".join((query, str(max_results)))),
+        )
+
+        async def produce(idem: str) -> dict:
+            hits = await self._inner.search(query, max_results=max_results)
+            return {"hits": [h.model_dump(mode="json") for h in hits]}
+
+        with span(
+            "search",
+            node=call.node,
+            session_id=call.session_id,
+            attempt=call.attempt,
+        ):
+            cached = await self._ledger.run(key, produce)
+        return [SearchHit.model_validate(h) for h in cached["hits"]]

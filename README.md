@@ -55,12 +55,15 @@ checkpointer (`backend/tests/test_resume.py`, `test_ledger.py`):
 
 - LangGraph checkpoints **per super-step** (thread_id = session_id), so a resume
   skips completed nodes — **no re-executed work**.
-- Every LLM / embedding call is wrapped in a **durable ledger** (`llm_calls`,
-  PRD §6.5): reserve → single-flight / lease-takeover → call-with-provider-
-  idempotency-key → commit. A committed call is **never re-paid**; concurrent
-  resumes single-flight on one provider call; a crash mid-call is de-duped by the
-  provider idempotency key. → *a mid-node kill re-pays no tokens and leaves no
-  duplicate rows.*
+- Every LLM / embedding / search call is wrapped in a **durable ledger**
+  (`llm_calls`, PRD §6.5): reserve → single-flight / lease-takeover → call →
+  commit, and **only a ledger-committed result ever enters graph state** (a
+  non-owner that lost a takeover re-resolves rather than returning its own value).
+  A committed call is **never re-paid**; concurrent resumes single-flight on one
+  provider call. LLM/embedding calls also pass the ledger key as the **provider
+  idempotency key** so an in-flight crash is de-duped provider-side; search (Tavily
+  has no such header) is covered by the ledger's committed-result short-circuit.
+  → *a mid-node kill re-pays no tokens/searches and leaves no duplicate rows.*
 - `persist` is a single transaction that **replaces** the full session
   materialization (deletes orphans, supersedes re-researched facts), so a
   regenerate/resume is **convergent**, not just duplicate-free.
@@ -76,8 +79,12 @@ and isolates the cross-session memory table, so no secrets or network are needed
 
 ```bash
 docker compose up -d postgres redis
-uv run pytest backend/tests          # 98 tests
+uv run pytest backend/tests          # 105 tests
 ```
+
+> If the suite hangs on startup, the data containers are probably down (they stop
+> when the host sleeps). `docker compose start postgres redis` brings them back —
+> `GET /healthz` (or `docker compose ps`) confirms both are healthy first.
 
 ## Local dev (without Docker)
 
